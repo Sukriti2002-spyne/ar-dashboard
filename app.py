@@ -118,8 +118,68 @@ BUCKET_ORDER = ["0-15", "16-30", "31-45", "46-60", "61-90", "90+"]
 DB_PATH      = os.path.join(os.path.dirname(__file__), "reasons.db")
 CREDS_PATH   = os.path.join(os.path.dirname(__file__), "credentials.json")
 
-# ── Credential persistence ────────────────────────────────────────────────────
+# ── Login helpers ─────────────────────────────────────────────────────────────
 import json
+import hashlib
+
+def _hash_pw(password: str) -> str:
+    return hashlib.sha256(password.strip().encode()).hexdigest()
+
+def _load_users() -> dict:
+    """Return {username: hashed_password} from st.secrets or credentials.json."""
+    users = {}
+    # 1. st.secrets (Streamlit Cloud)
+    try:
+        if "users" in st.secrets:
+            for uname, pw in st.secrets["users"].items():
+                # support both plain and pre-hashed (64-char hex) passwords
+                users[uname.lower()] = pw if len(pw) == 64 else _hash_pw(pw)
+    except Exception:
+        pass
+    # 2. credentials.json (local dev)
+    if not users and os.path.exists(CREDS_PATH):
+        try:
+            with open(CREDS_PATH, "r") as f:
+                data = json.load(f)
+            for uname, pw in data.get("users", {}).items():
+                users[uname.lower()] = pw if len(pw) == 64 else _hash_pw(pw)
+        except Exception:
+            pass
+    # 3. Hard-coded fallback (initial setup / local dev without config)
+    if not users:
+        users = {
+            "admin":   _hash_pw("spyne@2024"),
+            "finance": _hash_pw("spyne@2024"),
+        }
+    return users
+
+def _login_page():
+    """Render the login page. Returns True if already authenticated."""
+    if st.session_state.get("_authenticated"):
+        return True
+
+    # Centre the form
+    _, mid, _ = st.columns([1, 1.2, 1])
+    with mid:
+        st.markdown(
+            "<h2 style='text-align:center;margin-bottom:4px;'>🔐 AR Collections Dashboard</h2>"
+            "<p style='text-align:center;color:#6b7280;margin-bottom:24px;'>Spyne.ai · Finance Team</p>",
+            unsafe_allow_html=True,
+        )
+        with st.form("login_form"):
+            username = st.text_input("Username").strip().lower()
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Login", use_container_width=True, type="primary")
+
+        if submitted:
+            users = _load_users()
+            if username and password and users.get(username) == _hash_pw(password):
+                st.session_state["_authenticated"] = True
+                st.session_state["_username"]      = username
+                st.rerun()
+            else:
+                st.error("❌ Invalid username or password.")
+    return False
 
 def load_credentials():
     """Read saved credentials and populate session_state defaults.
@@ -1157,7 +1217,21 @@ def fetch_gsheet_private(url: str, creds_json: str) -> bytes:
 # MAIN APP
 # ─────────────────────────────────────────────────────────────────────────────
 init_db()
+
+# ── Login gate ────────────────────────────────────────────────────────────────
+if not _login_page():
+    st.stop()
+
 load_credentials()   # populate session_state from credentials.json (first run only)
+
+# ── Logout in sidebar ─────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown(f"👤 **{st.session_state.get('_username', 'user').title()}**")
+    if st.button("🚪 Logout", use_container_width=True):
+        st.session_state["_authenticated"] = False
+        st.session_state["_username"]      = ""
+        st.rerun()
+    st.divider()
 
 st.title("📊 AR Collections Dashboard")
 
