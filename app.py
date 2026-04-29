@@ -1271,7 +1271,10 @@ else:
 # ── Last-refreshed caption ────────────────────────────────────────────────────
 _last = st.session_state.get("_gs_last_refresh")
 if _last:
-    st.caption(f"📄 Data as of **{datetime.fromtimestamp(_last).strftime('%d %b %Y, %H:%M:%S')}** · Click **Refresh Data** to fetch latest.")
+    from datetime import timezone, timedelta
+    _IST = timezone(timedelta(hours=5, minutes=30))
+    _ist_time = datetime.fromtimestamp(_last, tz=_IST).strftime('%d %b %Y, %I:%M:%S %p IST')
+    st.caption(f"📄 Data as of **{_ist_time}** · Click **Refresh Data** to fetch latest.")
 
 df = load_data(file_bytes)
 
