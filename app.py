@@ -211,14 +211,14 @@ def _invoice_table_html(invoices_df: pd.DataFrame) -> str:
     for i, (_, r) in enumerate(invoices_df.iterrows()):
         bg       = "#f8fafc" if i % 2 == 0 else "#ffffff"
         sym      = CURR_SYM.get(str(r.get("currency_code","")).upper(), "")
-        amount   = r.get("Final USD", r.get("total", 0))
+        amount   = r.get("total", r.get("Final USD", 0))
         balance  = r.get("balance", amount)   # outstanding balance in FC
         inv_date = str(r.get("date",""))[:10]
         svc_s    = str(r.get("Service_period_Start_date",""))[:10]
         svc_e    = str(r.get("Service_period_End_date",""))[:10]
 
         # Highlight outstanding balance in red if it differs from invoice amount
-        bal_style = "color:#dc2626;font-weight:700;" if float(balance) < float(amount) else "font-weight:600;"
+        bal_style = "color:#000000;font-weight:700;"
 
         # Pay Now button — only rendered when a valid payment link exists
         pay_link = str(r.get("payment_link", "") or "").strip()
@@ -230,17 +230,17 @@ def _invoice_table_html(invoices_df: pd.DataFrame) -> str:
                 f'text-decoration:none;letter-spacing:0.03em;">Pay Now →</a>'
             )
         else:
-            pay_cell = '<span style="color:#9ca3af;font-size:12px;">—</span>'
+            pay_cell = '<span style="color:#000000;font-size:12px;">—</span>'
 
         rows += f"""
         <tr style="background:{bg};">
-          <td style="padding:9px 12px;font-size:13px;color:#111827;border-bottom:1px solid #e2e8f0;">{r.get("invoice_number","")}</td>
-          <td style="padding:9px 12px;font-size:13px;color:#111827;border-bottom:1px solid #e2e8f0;">{inv_date}</td>
-          <td style="padding:9px 12px;font-size:13px;color:#111827;border-bottom:1px solid #e2e8f0;">{r.get("currency_code","")}</td>
-          <td style="padding:9px 12px;font-size:13px;color:#111827;border-bottom:1px solid #e2e8f0;font-weight:600;">{sym}{amount:,.0f}</td>
-          <td style="padding:9px 12px;font-size:13px;border-bottom:1px solid #e2e8f0;{bal_style}">{sym}{balance:,.0f}</td>
-          <td style="padding:9px 12px;font-size:13px;color:#111827;border-bottom:1px solid #e2e8f0;">{svc_s}</td>
-          <td style="padding:9px 12px;font-size:13px;color:#111827;border-bottom:1px solid #e2e8f0;">{svc_e}</td>
+          <td style="padding:9px 12px;font-size:13px;color:#000000;border-bottom:1px solid #e2e8f0;">{r.get("invoice_number","")}</td>
+          <td style="padding:9px 12px;font-size:13px;color:#000000;border-bottom:1px solid #e2e8f0;">{inv_date}</td>
+          <td style="padding:9px 12px;font-size:13px;color:#000000;border-bottom:1px solid #e2e8f0;">{r.get("currency_code","")}</td>
+          <td style="padding:9px 12px;font-size:13px;color:#000000;border-bottom:1px solid #e2e8f0;font-weight:600;">{fmt_amount(amount, r.get("currency_code",""))}</td>
+          <td style="padding:9px 12px;font-size:13px;border-bottom:1px solid #e2e8f0;{bal_style}">{fmt_amount(balance, r.get("currency_code",""))}</td>
+          <td style="padding:9px 12px;font-size:13px;color:#000000;border-bottom:1px solid #e2e8f0;">{svc_s}</td>
+          <td style="padding:9px 12px;font-size:13px;color:#000000;border-bottom:1px solid #e2e8f0;">{svc_e}</td>
           <td style="padding:9px 12px;border-bottom:1px solid #e2e8f0;text-align:center;">{pay_cell}</td>
         </tr>"""
 
@@ -252,29 +252,29 @@ def _invoice_table_html(invoices_df: pd.DataFrame) -> str:
                               .reset_index()
                               .sort_values("balance", ascending=False))
         total_str = "  |  ".join(
-            f"{CURR_SYM.get(str(r['currency_code']).upper(), '')}{r['balance']:,.0f}"
+            fmt_amount(r["balance"], r["currency_code"])
             for _, r in by_curr.iterrows()
         )
     else:
         total_usd = invoices_df["Final USD"].sum() if "Final USD" in invoices_df.columns else 0
-        total_str = f"${total_usd:,.0f}"
+        total_str = fmt_amount(total_usd, "USD")
 
     rows += f"""
         <tr style="background:#f1f5f9;">
-          <td colspan="4" style="padding:10px 12px;font-size:13px;font-weight:700;color:#111827;">Total Outstanding</td>
-          <td colspan="4" style="padding:10px 12px;font-size:13px;font-weight:700;color:#dc2626;">{total_str}</td>
+          <td colspan="4" style="padding:10px 12px;font-size:13px;font-weight:700;color:#000000;">Total Outstanding</td>
+          <td colspan="4" style="padding:10px 12px;font-size:13px;font-weight:700;color:#000000;">{total_str}</td>
         </tr>"""
 
     header = """
       <tr style="background:#1a1a2e;">
-        <th style="padding:10px 12px;text-align:left;font-size:12px;color:#94a3b8;text-transform:uppercase;font-weight:600;">Invoice No.</th>
-        <th style="padding:10px 12px;text-align:left;font-size:12px;color:#94a3b8;text-transform:uppercase;font-weight:600;">Invoice Date</th>
-        <th style="padding:10px 12px;text-align:left;font-size:12px;color:#94a3b8;text-transform:uppercase;font-weight:600;">Currency</th>
-        <th style="padding:10px 12px;text-align:left;font-size:12px;color:#94a3b8;text-transform:uppercase;font-weight:600;">Invoice Amount</th>
-        <th style="padding:10px 12px;text-align:left;font-size:12px;color:#94a3b8;text-transform:uppercase;font-weight:600;">Outstanding Balance</th>
-        <th style="padding:10px 12px;text-align:left;font-size:12px;color:#94a3b8;text-transform:uppercase;font-weight:600;">Service Start</th>
-        <th style="padding:10px 12px;text-align:left;font-size:12px;color:#94a3b8;text-transform:uppercase;font-weight:600;">Service End</th>
-        <th style="padding:10px 12px;text-align:center;font-size:12px;color:#94a3b8;text-transform:uppercase;font-weight:600;">Payment</th>
+        <th style="padding:10px 12px;text-align:left;font-size:12px;color:#ffffff;text-transform:uppercase;font-weight:600;">Invoice No.</th>
+        <th style="padding:10px 12px;text-align:left;font-size:12px;color:#ffffff;text-transform:uppercase;font-weight:600;">Invoice Date</th>
+        <th style="padding:10px 12px;text-align:left;font-size:12px;color:#ffffff;text-transform:uppercase;font-weight:600;">Currency</th>
+        <th style="padding:10px 12px;text-align:left;font-size:12px;color:#ffffff;text-transform:uppercase;font-weight:600;">Invoice Amount</th>
+        <th style="padding:10px 12px;text-align:left;font-size:12px;color:#ffffff;text-transform:uppercase;font-weight:600;">Outstanding Balance</th>
+        <th style="padding:10px 12px;text-align:left;font-size:12px;color:#ffffff;text-transform:uppercase;font-weight:600;">Service Start</th>
+        <th style="padding:10px 12px;text-align:left;font-size:12px;color:#ffffff;text-transform:uppercase;font-weight:600;">Service End</th>
+        <th style="padding:10px 12px;text-align:center;font-size:12px;color:#ffffff;text-transform:uppercase;font-weight:600;">Payment</th>
       </tr>"""
 
     return f"""
@@ -288,7 +288,7 @@ def _email_wrapper(header_color: str, header_title: str,
                    banner_color: str, banner_text: str,
                    customer: str, body_html: str,
                    custom_note: str, csm: str) -> str:
-    note_block = (f'<p style="color:#374151;font-size:14px;background:#fffbeb;'
+    note_block = (f'<p style="color:#000000;font-size:14px;background:#fffbeb;'
                   f'border-left:4px solid #f59e0b;padding:12px 16px;'
                   f'border-radius:4px;margin-bottom:20px;">{custom_note}</p>'
                   if custom_note.strip() else "")
@@ -311,16 +311,16 @@ def _email_wrapper(header_color: str, header_title: str,
       </td></tr>
       {banner}
       <tr><td style="padding:30px 32px;">
-        <p style="color:#374151;font-size:15px;margin:0 0 18px;">
+        <p style="color:#000000;font-size:15px;margin:0 0 18px;">
           Dear <strong>{customer}</strong>,
         </p>
         {body_html}
         {note_block}
-        <p style="color:#374151;font-size:14px;margin:20px 0 4px;">Best regards,</p>
-        <p style="color:#374151;font-size:14px;font-weight:700;margin:0;">Finance Team – Spyne.ai</p>
+        <p style="color:#000000;font-size:14px;margin:20px 0 4px;">Best regards,</p>
+        <p style="color:#000000;font-size:14px;font-weight:700;margin:0;">Finance Team – Spyne.ai</p>
       </td></tr>
       <tr><td style="background:#f8fafc;padding:14px 32px;border-top:1px solid #e2e8f0;">
-        <p style="color:#9ca3af;font-size:11px;margin:0;text-align:center;">
+        <p style="color:#000000;font-size:11px;margin:0;text-align:center;">
           Automated reminder from Spyne.ai Finance · Please ignore if payment has been made.
         </p>
       </td></tr>
@@ -338,13 +338,29 @@ def build_email(template_key: str, customer: str, invoices_df: pd.DataFrame,
     invoices_df must have: invoice_number, date, currency_code, Final USD,
                            Service_period_Start_date, Service_period_End_date, Aging
     """
-    total     = invoices_df["Final USD"].sum() if "Final USD" in invoices_df.columns else 0
     n         = len(invoices_df)
     max_aging = int(invoices_df["Aging"].max()) if "Aging" in invoices_df.columns else 0
     inv_table = _invoice_table_html(invoices_df)
 
+    # Build total string from outstanding balance (same as the table Total row)
+    if "balance" in invoices_df.columns and "currency_code" in invoices_df.columns:
+        _by_curr = (invoices_df.groupby("currency_code")["balance"]
+                    .sum().reset_index()
+                    .sort_values("balance", ascending=False))
+        total_str = "  |  ".join(
+            fmt_amount(r["balance"], r["currency_code"])
+            for _, r in _by_curr.iterrows()
+        )
+        # scalar fallback for subject lines (use largest currency bucket)
+        total = _by_curr["balance"].iloc[0] if len(_by_curr) else 0
+        total_subject = fmt_amount(total, _by_curr["currency_code"].iloc[0]) if len(_by_curr) else "$0"
+    else:
+        total     = invoices_df["Final USD"].sum() if "Final USD" in invoices_df.columns else 0
+        total_str = fmt_amount(total, "USD")
+        total_subject = fmt_amount(total, "USD")
+
     if template_key == "final":
-        subject = f"⚠️ Final Payment Reminder – {customer} | ${total:,.0f} Outstanding"
+        subject = f"⚠️ Final Payment Reminder – {customer} | {total_subject} Outstanding"
         body = f"""
         <p style="color:#dc2626;font-size:15px;font-weight:700;
                   background:#fef2f2;border-left:4px solid #dc2626;
@@ -353,85 +369,85 @@ def build_email(template_key: str, customer: str, invoices_df: pd.DataFrame,
           Failure to make the payment within <strong>7 working days</strong> of this email
           may result in <strong>disruption of your Spyne.ai services</strong>.
         </p>
-        <p style="color:#374151;font-size:14px;margin:0 0 18px;">
+        <p style="color:#000000;font-size:14px;margin:0 0 18px;">
           We urge you to treat this matter with the utmost priority.
           Please find the details of all outstanding invoices below:
         </p>
         {inv_table}
-        <p style="color:#374151;font-size:14px;margin:0 0 18px;">
+        <p style="color:#000000;font-size:14px;margin:0 0 18px;">
           If you have already initiated the payment, we request you to
           <strong>share the transaction / UTR details</strong> by replying to this email
           so we can update our records accordingly.
         </p>
-        <p style="color:#374151;font-size:14px;margin:0 0 8px;">
+        <p style="color:#000000;font-size:14px;margin:0 0 8px;">
           For any queries, please contact your Customer Success Manager
           <strong>{csm}</strong> immediately.
         </p>"""
         html = _email_wrapper("#991b1b","⚠️ Final Payment Reminder",
-                               "#dc2626", f"{n} invoice(s) | ${total:,.0f} outstanding",
+                               "#dc2626", f"{n} invoice(s) | {total_subject} outstanding",
                                customer, body, custom_note, csm)
 
     elif template_key == "urgent":
-        subject = f"🔴 Urgent: Payment Required – {customer} | ${total:,.0f} Outstanding"
+        subject = f"🔴 Urgent: Payment Required – {customer} | {total_subject} Outstanding"
         body = f"""
-        <p style="color:#374151;font-size:15px;margin:0 0 16px;">
+        <p style="color:#000000;font-size:15px;margin:0 0 16px;">
           We would like to draw your <strong>immediate attention</strong> to the following
           outstanding invoices that require immediate action.
         </p>
-        <p style="color:#374151;font-size:14px;margin:0 0 18px;">
-          The total outstanding amount of <strong>${total:,.0f}</strong> across
+        <p style="color:#000000;font-size:14px;margin:0 0 18px;">
+          The total outstanding amount of <strong>{total_str}</strong> across
           <strong>{n} invoice(s)</strong> is pending. We request your immediate action
           to avoid any impact on your account.
         </p>
         {inv_table}
-        <p style="color:#374151;font-size:14px;margin:0 0 8px;">
+        <p style="color:#000000;font-size:14px;margin:0 0 8px;">
           We request you to arrange the payment at the earliest and confirm
           by replying to this email. Please contact your CSM
           <strong>{csm}</strong> if you need any assistance.
         </p>"""
         html = _email_wrapper("#b45309","🔴 Urgent Payment Reminder",
-                               "#d97706", f"{n} invoice(s) | ${total:,.0f} outstanding",
+                               "#d97706", f"{n} invoice(s) | {total_subject} outstanding",
                                customer, body, custom_note, csm)
 
     elif template_key == "friendly":
         subject = f"Friendly Reminder: Outstanding Invoices – {customer}"
         body = f"""
-        <p style="color:#374151;font-size:15px;margin:0 0 16px;">
+        <p style="color:#000000;font-size:15px;margin:0 0 16px;">
           Hope this email finds you well!
         </p>
-        <p style="color:#374151;font-size:14px;margin:0 0 18px;">
+        <p style="color:#000000;font-size:14px;margin:0 0 18px;">
           This is a friendly reminder that you have <strong>{n} invoice(s)</strong>
-          that are currently outstanding, totalling <strong>${total:,.0f}</strong>.
+          that are currently outstanding, totalling <strong>{total_str}</strong>.
           We would appreciate it if you could arrange the payment at your earliest convenience.
         </p>
         {inv_table}
-        <p style="color:#374151;font-size:14px;margin:0 0 8px;">
+        <p style="color:#000000;font-size:14px;margin:0 0 8px;">
           If you have any questions or need clarification on any of these invoices,
           please feel free to reach out to your Customer Success Manager
           <strong>{csm}</strong> or simply reply to this email. We are happy to help!
         </p>
-        <p style="color:#374151;font-size:14px;margin:12px 0 0;">
+        <p style="color:#000000;font-size:14px;margin:12px 0 0;">
           Thank you for your continued partnership with Spyne.ai 🙏
         </p>"""
         html = _email_wrapper("#065f46","Friendly Payment Reminder",
-                               "#10b981", f"{n} invoice(s) | ${total:,.0f} outstanding",
+                               "#10b981", f"{n} invoice(s) | {total_subject} outstanding",
                                customer, body, custom_note, csm)
 
     else:  # subscription
         inv_row = invoices_df.iloc[0]
         sym = CURR_SYM.get(str(inv_row.get("currency_code","")).upper(), "")
-        inv_amt = inv_row.get("Final USD", inv_row.get("total", 0))
+        inv_amt = inv_row.get("total", inv_row.get("Final USD", 0))
         subject = f"New Subscription Invoice – {customer} | {sym}{inv_amt:,.0f}"
         body = f"""
-        <p style="color:#374151;font-size:15px;margin:0 0 16px;">
+        <p style="color:#000000;font-size:15px;margin:0 0 16px;">
           We hope you are enjoying Spyne.ai!
         </p>
-        <p style="color:#374151;font-size:14px;margin:0 0 18px;">
+        <p style="color:#000000;font-size:14px;margin:0 0 18px;">
           A new <strong>subscription invoice</strong> has been generated for your account.
           Please find the details below and arrange payment as per your billing terms.
         </p>
         {inv_table}
-        <p style="color:#374151;font-size:14px;margin:0 0 8px;">
+        <p style="color:#000000;font-size:14px;margin:0 0 8px;">
           If you have any questions regarding this invoice, please contact your
           Customer Success Manager <strong>{csm}</strong> or reply to this email.
         </p>"""
@@ -903,6 +919,33 @@ def fmt_inr(val):
     if abs(val) >= 1_000:
         return f"₹{val/1_000:.1f}K"
     return f"₹{val:,.0f}"
+
+def _indian_commas(n: float) -> str:
+    """Format an integer using Indian comma placement: last 3 digits then groups of 2.
+    e.g. 2154240 → '21,54,240'  |  21542400 → '2,15,42,400'
+    """
+    neg = n < 0
+    s = str(int(abs(round(n))))
+    if len(s) <= 3:
+        result = s
+    else:
+        result = s[-3:]
+        s = s[:-3]
+        while len(s) > 2:
+            result = s[-2:] + "," + result
+            s = s[:-2]
+        result = s + "," + result
+    return ("-" if neg else "") + result
+
+def fmt_amount(val: float, currency_code: str) -> str:
+    """Format a monetary amount with currency symbol and locale-appropriate separators.
+    INR  → Indian lakh/crore comma style  (₹21,54,240)
+    Others → standard million comma style ($1,234,567)
+    """
+    sym = CURR_SYM.get(str(currency_code).upper(), "")
+    if str(currency_code).upper() == "INR":
+        return f"{sym}{_indian_commas(val)}"
+    return f"{sym}{val:,.0f}"
 
 
 def rag_badge(val):
