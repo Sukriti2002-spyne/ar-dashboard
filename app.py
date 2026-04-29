@@ -1340,37 +1340,8 @@ with st.sidebar:
         raw = st.session_state.get("_raw_cols", list(df.columns))
         st.write(raw)
 
-    st.divider()
-    st.subheader("📧 Gmail SMTP")
-    with st.expander("Configure Gmail", expanded=False):
-        st.markdown("""
-**Setup (one-time):**
-1. Go to [Google App Passwords](https://myaccount.google.com/apppasswords)
-2. Select *Mail* → *Other* → name it `AR Dashboard`
-3. Copy the 16-character password and paste below
-""")
-        smtp_host   = st.text_input("SMTP Host", value="smtp.gmail.com",        key="smtp_host",   disabled=True)
-        smtp_port   = st.number_input("Port",    value=587, step=1,             key="smtp_port",   disabled=True)
-        smtp_user   = st.text_input("Gmail Address", placeholder="you@gmail.com",
-                                    value=st.session_state.get("smtp_user",""), key="smtp_user")
-        smtp_pass   = st.text_input("App Password (16 chars)",
-                                    value=st.session_state.get("smtp_pass",""),
-                                    type="password",                            key="smtp_pass")
-        smtp_sender = st.text_input("From Name / Email",
-                                    value=st.session_state.get("smtp_sender","finance@spyne.ai"),
-                                    key="smtp_sender")
-        st.session_state["smtp_tls"] = True   # Gmail always uses STARTTLS on 587
 
-        if smtp_user and smtp_pass:
-            st.success("✅ Gmail credentials loaded.")
-            if st.button("💾 Save Gmail Credentials", key="save_gmail_btn",
-                         use_container_width=True):
-                save_credentials()
-                st.success("Saved to credentials.json — will auto-load on next restart.")
-        else:
-            st.warning("Enter your Gmail address and App Password to enable sending.")
-
-    # Expose SMTP config as a dict for use in the tab
+    # ── SMTP config — read silently from secrets / credentials.json ──────────
     SMTP_CFG = {
         "host":     "smtp.gmail.com",
         "port":     587,
@@ -1380,262 +1351,7 @@ with st.sidebar:
         "use_tls":  True,
     }
 
-    st.divider()
-    st.subheader("📎 Zoho Books")
-    with st.expander("Configure Zoho Books", expanded=False):
-        st.markdown("""
-**Step-by-step setup:**
-1. Open [Zoho API Console](https://api-console.zoho.in) *(India)* or [api-console.zoho.com](https://api-console.zoho.com) *(US/other)*
-2. Click **Self Client** → **Create**
-3. **Scope:** `ZohoBooks.invoices.READ`  ·  **Time Duration:** 10 minutes  → **Create**
-4. Copy the **one-time code** shown, then run this command in a terminal to exchange it for a refresh token:
-```
-POST https://accounts.zoho.in/oauth/v2/token
-  grant_type=authorization_code
-  client_id=YOUR_CLIENT_ID
-  client_secret=YOUR_CLIENT_SECRET
-  redirect_uri=https://www.zoho.in
-  code=THE_ONE_TIME_CODE
-```
-5. From the response, copy `refresh_token` and paste below.
-6. **Organization ID:** Zoho Books → Settings ⚙️ → Organization Profile → *Org ID*
-""")
-
-        st.markdown("---")
-        st.markdown("**⚠️ `invalid_client` troubleshooting:**")
-        st.markdown("""
-- Make sure **Data Center** below matches where your Zoho account is
-  (Indian accounts → `India (.in)`)
-- Client ID / Secret must come from the **same** API Console as your data center
-- Paste the **Refresh Token** (from step 5 above), NOT the one-time authorization code
-- Remove any leading/trailing spaces when pasting credentials
-""")
-        st.markdown("---")
-
-        zoho_dc_sel = st.selectbox(
-            "Data Center", list(ZOHO_DC_MAP.keys()),
-            index=0, key="zoho_dc",
-            help="Must match the Zoho region your account belongs to",
-        )
-
-        st.markdown("**Organization IDs** *(you can enter up to 2 — both will be searched)*")
-        zc1, zc2 = st.columns(2)
-        with zc1:
-            st.text_input(
-                "Primary Org ID",
-                value=st.session_state.get("zoho_org_id_1", ""),
-                placeholder="e.g. 123456789",
-                key="zoho_org_id_1",
-            )
-        with zc2:
-            st.text_input(
-                "Secondary Org ID (optional)",
-                value=st.session_state.get("zoho_org_id_2", ""),
-                placeholder="e.g. 987654321",
-                key="zoho_org_id_2",
-            )
-
-        st.text_input(
-            "Client ID",
-            value=st.session_state.get("zoho_client_id", ""),
-            key="zoho_client_id",
-        )
-        st.text_input(
-            "Client Secret",
-            value=st.session_state.get("zoho_client_secret", ""),
-            type="password",
-            key="zoho_client_secret",
-        )
-        # Apply exchanged token BEFORE the widget renders (Streamlit rule: can't
-        # write to a widget key after it's instantiated, so we stage it here).
-        if "_zoho_rt_pending" in st.session_state:
-            st.session_state["zoho_refresh_token"] = st.session_state.pop("_zoho_rt_pending")
-
-        st.text_input(
-            "Refresh Token",
-            value=st.session_state.get("zoho_refresh_token", ""),
-            type="password",
-            key="zoho_refresh_token",
-            help="This is the long-lived token — NOT the one-time code. Use the exchange tool below if you only have the code.",
-        )
-
-        # ── In-app code → refresh-token exchange (no terminal needed) ─────────
-        with st.expander("🔄 Exchange Authorization Code → Refresh Token", expanded=False):
-            st.markdown("""
-**When to use this:**
-After clicking *Generate Code* in Zoho API Console (Self Client), paste
-the code here. The app exchanges it for a **Refresh Token** and saves it
-automatically.
-
-> ⚠️ Codes expire in **~10 minutes** — exchange immediately.
-
-**`invalid_code` error?** The code was already used or expired.
-Go back to API Console, generate a fresh code, and paste it here right away.
-""")
-            auth_code_input = st.text_input(
-                "One-time Authorization Code",
-                placeholder="1000.xxxxxxxxxxxxxxxx.xxxxxxxx",
-                key="zoho_auth_code_input",
-            )
-            redirect_uri_input = st.text_input(
-                "Redirect URI (must match what you used when generating the code)",
-                value="https://www.zoho.in",
-                key="zoho_redirect_uri",
-            )
-            if st.button("⚡ Exchange Code for Refresh Token", key="zoho_exchange_btn",
-                         use_container_width=True):
-                _cid_ex  = st.session_state.get("zoho_client_id",     "").strip()
-                _csec_ex = st.session_state.get("zoho_client_secret", "").strip()
-                _dc_ex   = st.session_state.get("zoho_dc", "US (.com)")
-                _code_ex = auth_code_input.strip()
-                if not all([_cid_ex, _csec_ex, _code_ex]):
-                    st.error("Fill in Client ID, Client Secret, and the Authorization Code first.")
-                else:
-                    auth_host_ex, _ = ZOHO_DC_MAP.get(_dc_ex, ZOHO_DC_MAP["US (.com)"])
-                    try:
-                        ex_resp = requests.post(
-                            f"https://{auth_host_ex}/oauth/v2/token",
-                            data={
-                                "grant_type":    "authorization_code",
-                                "client_id":     _cid_ex,
-                                "client_secret": _csec_ex,
-                                "redirect_uri":  redirect_uri_input.strip(),
-                                "code":          _code_ex,
-                            },
-                            timeout=20,
-                        )
-                        ex_resp.raise_for_status()
-                        ex_data = ex_resp.json()
-                        if "refresh_token" in ex_data:
-                            # Stage the token; it will be applied before the
-                            # widget renders on the next rerun (avoids the
-                            # "cannot modify after widget instantiated" error).
-                            st.session_state["_zoho_rt_pending"] = ex_data["refresh_token"]
-                            st.success(
-                                "✅ Refresh Token saved! You can now close this section "
-                                "and use 'Test Connection'."
-                            )
-                            st.rerun()
-                        else:
-                            err_code = ex_data.get("error", str(ex_data))
-                            hints = {
-                                "invalid_code":   "The code is expired or already used. Generate a **new code** in Zoho API Console and paste it immediately.",
-                                "invalid_client": "Client ID or Secret doesn't match the selected Data Center. Re-check both.",
-                            }
-                            st.error(f"Exchange failed: `{err_code}`")
-                            if err_code in hints:
-                                st.warning(hints[err_code])
-                    except Exception as ex_err:
-                        st.error(f"Request error: {ex_err}")
-
-        # ── Compute readiness flags ────────────────────────────────────────────
-        _z_org1  = st.session_state.get("zoho_org_id_1", "").strip()
-        _z_cid   = st.session_state.get("zoho_client_id", "").strip()
-        _z_csec  = st.session_state.get("zoho_client_secret", "").strip()
-        _z_rtok  = st.session_state.get("zoho_refresh_token", "").strip()
-
-        zoho_ready = all([_z_org1, _z_cid, _z_csec, _z_rtok])
-        if zoho_ready:
-            st.success("✅ Zoho Books configured — invoice PDFs can be attached.")
-            tcol1, tcol2 = st.columns(2)
-            with tcol1:
-                if st.button("🔑 Test Connection", key="zoho_test_btn",
-                             use_container_width=True):
-                    try:
-                        get_zoho_token.clear()   # force fresh request
-                        tok = get_zoho_token(_z_cid, _z_csec, _z_rtok,
-                                             st.session_state.get("zoho_dc", "US (.com)"))
-                        st.success(f"✅ Connected! Token: {tok[:12]}…")
-                    except Exception as ex:
-                        err = str(ex)
-                        st.error(f"❌ {err}")
-                        hints = {
-                            "invalid_client": "Client ID/Secret wrong or wrong Data Center selected.",
-                            "invalid_code":   "You pasted the one-time code as the Refresh Token. Use the 'Exchange Code' tool above.",
-                        }
-                        for key, msg in hints.items():
-                            if key in err:
-                                st.warning(f"**Hint:** {msg}")
-            with tcol2:
-                if st.button("🔄 Clear Token Cache", key="zoho_clear_cache",
-                             use_container_width=True):
-                    get_zoho_token.clear()
-                    st.info("Cache cleared — fresh token will be fetched on next send.")
-
-            if st.button("💾 Save Zoho Credentials", key="save_zoho_btn",
-                         use_container_width=True, type="primary"):
-                save_credentials()
-                st.success("Saved to credentials.json — will auto-load on next restart.")
-        else:
-            st.caption("Fill Primary Org ID + Client ID + Client Secret + Refresh Token to enable PDF attachment.")
-
-        # ── Debug: inspect raw Zoho API response for any invoice ──────────────
-        if zoho_ready:
-            with st.expander("🔍 Debug — Inspect invoice API response", expanded=False):
-                st.caption("Use this to find the exact field name Zoho uses for the payment link in your account.")
-                debug_inv_no = st.text_input(
-                    "Invoice Number to inspect",
-                    placeholder="e.g. INV-000001",
-                    key="zoho_debug_inv",
-                )
-                if st.button("🔍 Fetch & Show Raw Response", key="zoho_debug_btn",
-                             use_container_width=True):
-                    if not debug_inv_no.strip():
-                        st.error("Enter an invoice number.")
-                    else:
-                        try:
-                            _dbg_dc  = st.session_state.get("zoho_dc", "US (.com)")
-                            _dbg_tok = get_zoho_token(_z_cid, _z_csec, _z_rtok, _dbg_dc)
-                            _, _dbg_api = ZOHO_DC_MAP.get(_dbg_dc, ZOHO_DC_MAP["US (.com)"])
-                            _dbg_base   = f"https://{_dbg_api}/books/v3"
-                            _dbg_hdrs   = {"Authorization": f"Zoho-oauthtoken {_dbg_tok}"}
-                            _dbg_orgs   = [o.strip() for o in [
-                                st.session_state.get("zoho_org_id_1",""),
-                                st.session_state.get("zoho_org_id_2",""),
-                            ] if o.strip()]
-
-                            for _dbg_org in _dbg_orgs:
-                                sr = requests.get(
-                                    f"{_dbg_base}/invoices",
-                                    params={"invoice_number": debug_inv_no.strip(),
-                                            "organization_id": _dbg_org},
-                                    headers=_dbg_hdrs, timeout=20,
-                                )
-                                _dbg_list = sr.json().get("invoices", [])
-                                if not _dbg_list:
-                                    st.warning(f"Org {_dbg_org}: invoice not found.")
-                                    continue
-
-                                _dbg_id = _dbg_list[0]["invoice_id"]
-                                st.success(f"Found in Org **{_dbg_org}** · invoice_id: `{_dbg_id}`")
-
-                                # Show list-response fields related to payment
-                                st.markdown("**Fields in list response (payment-related):**")
-                                pfields = {k: v for k, v in _dbg_list[0].items()
-                                           if any(x in k.lower() for x in
-                                                  ["pay", "link", "url", "secure", "online"])}
-                                st.json(pfields if pfields else {"note": "No payment-related fields in list response"})
-
-                                # Fetch full detail
-                                dr = requests.get(
-                                    f"{_dbg_base}/invoices/{_dbg_id}",
-                                    params={"organization_id": _dbg_org},
-                                    headers=_dbg_hdrs, timeout=20,
-                                )
-                                _dbg_detail = dr.json().get("invoice", {})
-
-                                st.markdown("**Fields in detail response (payment-related):**")
-                                pfields2 = {k: v for k, v in _dbg_detail.items()
-                                            if any(x in k.lower() for x in
-                                                   ["pay", "link", "url", "secure", "online"])}
-                                st.json(pfields2 if pfields2 else {"note": "No payment-related fields in detail response"})
-
-                                st.markdown("**Full detail response (all fields):**")
-                                st.json(_dbg_detail)
-                                break
-                        except Exception as dbg_err:
-                            st.error(f"Debug fetch failed: {dbg_err}")
-
+    # ── Zoho config — read silently from secrets / credentials.json ──────────
     # Build org_ids list (filter empty)
     _org_ids = [o.strip() for o in [
         st.session_state.get("zoho_org_id_1", ""),
@@ -2305,7 +2021,7 @@ with tab_email:
 
     smtp_ready = all([SMTP_CFG.get("user"), SMTP_CFG.get("password")])
     if not smtp_ready:
-        st.warning("⚙️ Enter your Gmail address and App Password in the **sidebar → Gmail SMTP** section before sending.")
+        st.warning("⚙️ Gmail credentials not configured. Add `smtp_user` and `smtp_pass` to your Streamlit secrets.")
 
     # ── Template & recipient config (shared across both sub-tabs) ─────────────
     cfg1, cfg2 = st.columns([2, 3])
@@ -2463,7 +2179,7 @@ with tab_email:
                         help="Fetches the Zoho SecurePay link for each invoice and embeds a Pay Now button in the email.",
                     )
             else:
-                st.caption("📎 Configure Zoho Books in the sidebar to enable PDF attachments and payment links.")
+                st.caption("📎 Zoho Books credentials not configured. Add Zoho keys to your Streamlit secrets to enable PDF attachments and payment links.")
 
             s1, s2 = st.columns([2, 3])
             with s1:
@@ -2661,7 +2377,7 @@ with tab_email:
                     help="Fetches the Zoho SecurePay link and embeds a Pay Now button in the email.",
                 )
         else:
-            st.caption("📎 Configure Zoho Books in the sidebar to enable PDF attachments and payment links.")
+            st.caption("📎 Zoho Books credentials not configured. Add Zoho keys to your Streamlit secrets to enable PDF attachments and payment links.")
 
         b1, b2 = st.columns([2, 3])
         with b1:
