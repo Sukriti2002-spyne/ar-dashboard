@@ -1,0 +1,2717 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import sqlite3
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime, date
+from io import BytesIO
+import os
+import re
+import requests
+import smtplib
+import ssl
+import time
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+
+try:
+    from streamlit_autorefresh import st_autorefresh as _st_autorefresh
+    _AUTOREFRESH_AVAILABLE = True
+except ImportError:
+    _AUTOREFRESH_AVAILABLE = False
+
+# ── Page config ───────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="AR Collections Dashboard",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+st.markdown("""
+<style>
+    /* Metric cards — visible on dark background */
+    div[data-testid="stMetric"] {
+        background: #1e2530;
+        border: 1px solid #2e3a4e;
+        border-radius: 10px;
+        padding: 14px 18px;
+    }
+    div[data-testid="stMetric"] label {
+        color: #94a3b8 !important;
+        font-size: 13px !important;
+        font-weight: 600 !important;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+        color: #f1f5f9 !important;
+        font-size: 26px !important;
+        font-weight: 700 !important;
+    }
+
+    /* Tab labels */
+    div[data-testid="stTabs"] button {
+        font-size: 14px;
+        font-weight: 600;
+        color: #94a3b8;
+    }
+    div[data-testid="stTabs"] button[aria-selected="true"] {
+        color: #60a5fa !important;
+        border-bottom: 2px solid #60a5fa !important;
+    }
+
+    /* General text contrast */
+    .block-container { padding-top: 1.5rem; }
+
+    /* RAG inline badges */
+    .rag-red   { color: #f87171; font-weight: 700; }
+    .rag-amber { color: #fbbf24; font-weight: 700; }
+    .rag-green { color: #34d399; font-weight: 700; }
+
+    /* Dividers */
+    hr { border-color: #2e3a4e !important; }
+
+    /* Sidebar */
+    section[data-testid="stSidebar"] {
+        background: #111827;
+        border-right: 1px solid #1f2937;
+    }
+    section[data-testid="stSidebar"] .stMarkdown p {
+        color: #94a3b8;
+    }
+
+    /* Buttons */
+    div[data-testid="stButton"] button[kind="primary"] {
+        background: #2563eb;
+        color: #fff;
+        border: none;
+        border-radius: 6px;
+        font-weight: 600;
+    }
+    div[data-testid="stButton"] button[kind="primary"]:hover {
+        background: #1d4ed8;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+REASON_CATEGORIES = [
+    "Dispute – Invoice Amount",
+    "Dispute – Service Delivered",
+    "Customer Unresponsive",
+    "Payment in Progress",
+    "Credit Note / Adjustment Pending",
+    "Contract / PO Issue",
+    "Escalated to Management",
+    "Promised to Pay",
+    "Write-off Candidate",
+    "Legal / Collections",
+    "Other",
+]
+
+RAG_COLORS   = {"Red": "#ef4444", "Amber": "#f59e0b", "Green": "#10b981"}
+BUCKET_ORDER = ["0-15", "16-30", "31-45", "46-60", "61-90", "90+"]
+DB_PATH      = os.path.join(os.path.dirname(__file__), "reasons.db")
+CREDS_PATH   = os.path.join(os.path.dirname(__file__), "credentials.json")
+
+# ── Credential persistence ────────────────────────────────────────────────────
+import json
+
+def load_credentials():
+    """Read saved credentials and populate session_state defaults.
+    Priority: st.secrets (cloud) → credentials.json (local) → blank.
+    Called once per session (guarded by _creds_loaded flag)."""
+    if st.session_state.get("_creds_loaded"):
+        return
+
+    creds = {"gmail": {}, "zoho": {}}
+
+    # ── 1. Try st.secrets (Streamlit Cloud) ───────────────────────────────────
+    try:
+        if "gmail" in st.secrets:
+            creds["gmail"] = dict(st.secrets["gmail"])
+        if "zoho" in st.secrets:
+            creds["zoho"] = dict(st.secrets["zoho"])
+    except Exception:
+        pass
+
+    # ── 2. Overlay / fallback with credentials.json (local dev) ───────────────
+    if os.path.exists(CREDS_PATH):
+        try:
+            with open(CREDS_PATH, "r") as f:
+                local = json.load(f)
+            # local file only fills keys not already set by st.secrets
+            for section in ("gmail", "zoho"):
+                for key, val in local.get(section, {}).items():
+                    creds[section].setdefault(key, val)
+        except Exception:
+            pass
+
+    # ── 3. Push into session_state ────────────────────────────────────────────
+    for section in ("gmail", "zoho"):
+        for key, val in creds[section].items():
+            if key not in st.session_state:
+                st.session_state[key] = val
+
+    st.session_state["_creds_loaded"] = True
+
+
+def save_credentials():
+    """Write current sidebar credentials to disk."""
+    creds = {
+        "gmail": {
+            "smtp_user":   st.session_state.get("smtp_user",   ""),
+            "smtp_pass":   st.session_state.get("smtp_pass",   ""),
+            "smtp_sender": st.session_state.get("smtp_sender", "finance@spyne.ai"),
+        },
+        "zoho": {
+            "zoho_dc":            st.session_state.get("zoho_dc",            "US (.com)"),
+            "zoho_org_id_1":      st.session_state.get("zoho_org_id_1",      ""),
+            "zoho_org_id_2":      st.session_state.get("zoho_org_id_2",      ""),
+            "zoho_client_id":     st.session_state.get("zoho_client_id",     ""),
+            "zoho_client_secret": st.session_state.get("zoho_client_secret", ""),
+            "zoho_refresh_token": st.session_state.get("zoho_refresh_token", ""),
+        },
+    }
+    with open(CREDS_PATH, "w") as f:
+        json.dump(creds, f, indent=2)
+
+# ── Database ──────────────────────────────────────────────────────────────────
+# ── Email helpers ─────────────────────────────────────────────────────────────
+FINANCE_CC = "finance@spyne.ai"
+
+# ── Currency symbol map (shared) ──────────────────────────────────────────────
+CURR_SYM = {"INR":"₹","USD":"$","EUR":"€","GBP":"£","AUD":"A$","CAD":"C$",
+            "NZD":"NZ$","SGD":"S$","HKD":"HK$","NOK":"kr ","SEK":"kr ","DKK":"kr "}
+
+TEMPLATES = {
+    "Final Reminder":        "final",
+    "Urgent Reminder":       "urgent",
+    "Friendly Reminder":     "friendly",
+    "Subscription Invoice":  "subscription",
+}
+
+# ── Zoho Books data-center map ────────────────────────────────────────────────
+# (auth_host, api_host)
+ZOHO_DC_MAP = {
+    "US (.com)":        ("accounts.zoho.com",     "www.zohoapis.com"),
+    "India (.in)":      ("accounts.zoho.in",      "www.zohoapis.in"),
+    "EU (.eu)":         ("accounts.zoho.eu",       "www.zohoapis.eu"),
+    "Australia (.au)":  ("accounts.zoho.com.au",   "www.zohoapis.com.au"),
+    "Japan (.jp)":      ("accounts.zoho.jp",       "www.zohoapis.jp"),
+}
+
+# ── Shared invoice table builder ───────────────────────────────────────────────
+def _invoice_table_html(invoices_df: pd.DataFrame) -> str:
+    rows = ""
+    for i, (_, r) in enumerate(invoices_df.iterrows()):
+        bg       = "#f8fafc" if i % 2 == 0 else "#ffffff"
+        sym      = CURR_SYM.get(str(r.get("currency_code","")).upper(), "")
+        amount   = r.get("Final USD", r.get("total", 0))
+        balance  = r.get("balance", amount)   # outstanding balance in FC
+        inv_date = str(r.get("date",""))[:10]
+        svc_s    = str(r.get("Service_period_Start_date",""))[:10]
+        svc_e    = str(r.get("Service_period_End_date",""))[:10]
+
+        # Highlight outstanding balance in red if it differs from invoice amount
+        bal_style = "color:#dc2626;font-weight:700;" if float(balance) < float(amount) else "font-weight:600;"
+
+        # Pay Now button — only rendered when a valid payment link exists
+        pay_link = str(r.get("payment_link", "") or "").strip()
+        if pay_link and pay_link.lower().startswith("http"):
+            pay_cell = (
+                f'<a href="{pay_link}" target="_blank" '
+                f'style="display:inline-block;background:#2563eb;color:#ffffff;'
+                f'padding:6px 16px;border-radius:5px;font-size:12px;font-weight:700;'
+                f'text-decoration:none;letter-spacing:0.03em;">Pay Now →</a>'
+            )
+        else:
+            pay_cell = '<span style="color:#9ca3af;font-size:12px;">—</span>'
+
+        rows += f"""
+        <tr style="background:{bg};">
+          <td style="padding:9px 12px;font-size:13px;color:#111827;border-bottom:1px solid #e2e8f0;">{r.get("invoice_number","")}</td>
+          <td style="padding:9px 12px;font-size:13px;color:#111827;border-bottom:1px solid #e2e8f0;">{inv_date}</td>
+          <td style="padding:9px 12px;font-size:13px;color:#111827;border-bottom:1px solid #e2e8f0;">{r.get("currency_code","")}</td>
+          <td style="padding:9px 12px;font-size:13px;color:#111827;border-bottom:1px solid #e2e8f0;font-weight:600;">{sym}{amount:,.0f}</td>
+          <td style="padding:9px 12px;font-size:13px;border-bottom:1px solid #e2e8f0;{bal_style}">{sym}{balance:,.0f}</td>
+          <td style="padding:9px 12px;font-size:13px;color:#111827;border-bottom:1px solid #e2e8f0;">{svc_s}</td>
+          <td style="padding:9px 12px;font-size:13px;color:#111827;border-bottom:1px solid #e2e8f0;">{svc_e}</td>
+          <td style="padding:9px 12px;border-bottom:1px solid #e2e8f0;text-align:center;">{pay_cell}</td>
+        </tr>"""
+
+    # Total row: sum outstanding balances per currency
+    total_rows = ""
+    if "balance" in invoices_df.columns and "currency_code" in invoices_df.columns:
+        by_curr = (invoices_df.groupby("currency_code")["balance"]
+                              .sum()
+                              .reset_index()
+                              .sort_values("balance", ascending=False))
+        total_str = "  |  ".join(
+            f"{CURR_SYM.get(str(r['currency_code']).upper(), '')}{r['balance']:,.0f}"
+            for _, r in by_curr.iterrows()
+        )
+    else:
+        total_usd = invoices_df["Final USD"].sum() if "Final USD" in invoices_df.columns else 0
+        total_str = f"${total_usd:,.0f}"
+
+    rows += f"""
+        <tr style="background:#f1f5f9;">
+          <td colspan="4" style="padding:10px 12px;font-size:13px;font-weight:700;color:#111827;">Total Outstanding</td>
+          <td colspan="4" style="padding:10px 12px;font-size:13px;font-weight:700;color:#dc2626;">{total_str}</td>
+        </tr>"""
+
+    header = """
+      <tr style="background:#1a1a2e;">
+        <th style="padding:10px 12px;text-align:left;font-size:12px;color:#94a3b8;text-transform:uppercase;font-weight:600;">Invoice No.</th>
+        <th style="padding:10px 12px;text-align:left;font-size:12px;color:#94a3b8;text-transform:uppercase;font-weight:600;">Invoice Date</th>
+        <th style="padding:10px 12px;text-align:left;font-size:12px;color:#94a3b8;text-transform:uppercase;font-weight:600;">Currency</th>
+        <th style="padding:10px 12px;text-align:left;font-size:12px;color:#94a3b8;text-transform:uppercase;font-weight:600;">Invoice Amount</th>
+        <th style="padding:10px 12px;text-align:left;font-size:12px;color:#94a3b8;text-transform:uppercase;font-weight:600;">Outstanding Balance</th>
+        <th style="padding:10px 12px;text-align:left;font-size:12px;color:#94a3b8;text-transform:uppercase;font-weight:600;">Service Start</th>
+        <th style="padding:10px 12px;text-align:left;font-size:12px;color:#94a3b8;text-transform:uppercase;font-weight:600;">Service End</th>
+        <th style="padding:10px 12px;text-align:center;font-size:12px;color:#94a3b8;text-transform:uppercase;font-weight:600;">Payment</th>
+      </tr>"""
+
+    return f"""
+    <table width="100%" cellpadding="0" cellspacing="0"
+           style="border:1px solid #e2e8f0;border-radius:6px;overflow:hidden;margin-bottom:24px;">
+      {header}{rows}
+    </table>"""
+
+
+def _email_wrapper(header_color: str, header_title: str,
+                   banner_color: str, banner_text: str,
+                   customer: str, body_html: str,
+                   custom_note: str, csm: str) -> str:
+    note_block = (f'<p style="color:#374151;font-size:14px;background:#fffbeb;'
+                  f'border-left:4px solid #f59e0b;padding:12px 16px;'
+                  f'border-radius:4px;margin-bottom:20px;">{custom_note}</p>'
+                  if custom_note.strip() else "")
+
+    banner = (f'<tr><td style="background:{banner_color};padding:12px 32px;">'
+              f'<span style="color:#fff;font-size:13px;font-weight:700;">{banner_text}</span>'
+              f'</td></tr>' if banner_text else "")
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"></head>
+<body style="font-family:Arial,sans-serif;background:#f4f4f4;margin:0;padding:0;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f4;padding:30px 0;">
+  <tr><td align="center">
+    <table width="700" cellpadding="0" cellspacing="0"
+           style="background:#fff;border-radius:8px;overflow:hidden;
+                  box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+      <tr><td style="background:{header_color};padding:22px 32px;">
+        <h2 style="color:#fff;margin:0;font-size:20px;">{header_title}</h2>
+        <p style="color:rgba(255,255,255,0.7);margin:4px 0 0;font-size:13px;">Spyne.ai – Finance Team</p>
+      </td></tr>
+      {banner}
+      <tr><td style="padding:30px 32px;">
+        <p style="color:#374151;font-size:15px;margin:0 0 18px;">
+          Dear <strong>{customer}</strong>,
+        </p>
+        {body_html}
+        {note_block}
+        <p style="color:#374151;font-size:14px;margin:20px 0 4px;">Best regards,</p>
+        <p style="color:#374151;font-size:14px;font-weight:700;margin:0;">Finance Team – Spyne.ai</p>
+      </td></tr>
+      <tr><td style="background:#f8fafc;padding:14px 32px;border-top:1px solid #e2e8f0;">
+        <p style="color:#9ca3af;font-size:11px;margin:0;text-align:center;">
+          Automated reminder from Spyne.ai Finance · Please ignore if payment has been made.
+        </p>
+      </td></tr>
+    </table>
+  </td></tr>
+</table>
+</body></html>"""
+
+
+# ── Master email builder ───────────────────────────────────────────────────────
+def build_email(template_key: str, customer: str, invoices_df: pd.DataFrame,
+                csm: str, custom_note: str) -> tuple[str, str]:
+    """
+    Returns (subject, html) for any of the 4 templates.
+    invoices_df must have: invoice_number, date, currency_code, Final USD,
+                           Service_period_Start_date, Service_period_End_date, Aging
+    """
+    total     = invoices_df["Final USD"].sum() if "Final USD" in invoices_df.columns else 0
+    n         = len(invoices_df)
+    max_aging = int(invoices_df["Aging"].max()) if "Aging" in invoices_df.columns else 0
+    inv_table = _invoice_table_html(invoices_df)
+
+    if template_key == "final":
+        subject = f"⚠️ Final Payment Reminder – {customer} | ${total:,.0f} Outstanding"
+        body = f"""
+        <p style="color:#dc2626;font-size:15px;font-weight:700;
+                  background:#fef2f2;border-left:4px solid #dc2626;
+                  padding:14px 16px;border-radius:4px;margin-bottom:20px;">
+          This is a <strong>Final Reminder</strong> for your outstanding dues.
+          Failure to make the payment within <strong>7 working days</strong> of this email
+          may result in <strong>disruption of your Spyne.ai services</strong>.
+        </p>
+        <p style="color:#374151;font-size:14px;margin:0 0 18px;">
+          We urge you to treat this matter with the utmost priority.
+          Please find the details of all outstanding invoices below:
+        </p>
+        {inv_table}
+        <p style="color:#374151;font-size:14px;margin:0 0 18px;">
+          If you have already initiated the payment, we request you to
+          <strong>share the transaction / UTR details</strong> by replying to this email
+          so we can update our records accordingly.
+        </p>
+        <p style="color:#374151;font-size:14px;margin:0 0 8px;">
+          For any queries, please contact your Customer Success Manager
+          <strong>{csm}</strong> immediately.
+        </p>"""
+        html = _email_wrapper("#991b1b","⚠️ Final Payment Reminder",
+                               "#dc2626", f"{n} invoice(s) | ${total:,.0f} outstanding",
+                               customer, body, custom_note, csm)
+
+    elif template_key == "urgent":
+        subject = f"🔴 Urgent: Payment Required – {customer} | ${total:,.0f} Outstanding"
+        body = f"""
+        <p style="color:#374151;font-size:15px;margin:0 0 16px;">
+          We would like to draw your <strong>immediate attention</strong> to the following
+          outstanding invoices that require immediate action.
+        </p>
+        <p style="color:#374151;font-size:14px;margin:0 0 18px;">
+          The total outstanding amount of <strong>${total:,.0f}</strong> across
+          <strong>{n} invoice(s)</strong> is pending. We request your immediate action
+          to avoid any impact on your account.
+        </p>
+        {inv_table}
+        <p style="color:#374151;font-size:14px;margin:0 0 8px;">
+          We request you to arrange the payment at the earliest and confirm
+          by replying to this email. Please contact your CSM
+          <strong>{csm}</strong> if you need any assistance.
+        </p>"""
+        html = _email_wrapper("#b45309","🔴 Urgent Payment Reminder",
+                               "#d97706", f"{n} invoice(s) | ${total:,.0f} outstanding",
+                               customer, body, custom_note, csm)
+
+    elif template_key == "friendly":
+        subject = f"Friendly Reminder: Outstanding Invoices – {customer}"
+        body = f"""
+        <p style="color:#374151;font-size:15px;margin:0 0 16px;">
+          Hope this email finds you well!
+        </p>
+        <p style="color:#374151;font-size:14px;margin:0 0 18px;">
+          This is a friendly reminder that you have <strong>{n} invoice(s)</strong>
+          that are currently outstanding, totalling <strong>${total:,.0f}</strong>.
+          We would appreciate it if you could arrange the payment at your earliest convenience.
+        </p>
+        {inv_table}
+        <p style="color:#374151;font-size:14px;margin:0 0 8px;">
+          If you have any questions or need clarification on any of these invoices,
+          please feel free to reach out to your Customer Success Manager
+          <strong>{csm}</strong> or simply reply to this email. We are happy to help!
+        </p>
+        <p style="color:#374151;font-size:14px;margin:12px 0 0;">
+          Thank you for your continued partnership with Spyne.ai 🙏
+        </p>"""
+        html = _email_wrapper("#065f46","Friendly Payment Reminder",
+                               "#10b981", f"{n} invoice(s) | ${total:,.0f} outstanding",
+                               customer, body, custom_note, csm)
+
+    else:  # subscription
+        inv_row = invoices_df.iloc[0]
+        sym = CURR_SYM.get(str(inv_row.get("currency_code","")).upper(), "")
+        inv_amt = inv_row.get("Final USD", inv_row.get("total", 0))
+        subject = f"New Subscription Invoice – {customer} | {sym}{inv_amt:,.0f}"
+        body = f"""
+        <p style="color:#374151;font-size:15px;margin:0 0 16px;">
+          We hope you are enjoying Spyne.ai!
+        </p>
+        <p style="color:#374151;font-size:14px;margin:0 0 18px;">
+          A new <strong>subscription invoice</strong> has been generated for your account.
+          Please find the details below and arrange payment as per your billing terms.
+        </p>
+        {inv_table}
+        <p style="color:#374151;font-size:14px;margin:0 0 8px;">
+          If you have any questions regarding this invoice, please contact your
+          Customer Success Manager <strong>{csm}</strong> or reply to this email.
+        </p>"""
+        html = _email_wrapper("#1e40af","New Subscription Invoice",
+                               "#2563eb", f"Invoice generated for {customer}",
+                               customer, body, custom_note, csm)
+
+    return subject, html
+
+
+def send_reminder(smtp_cfg: dict, to: str, cc_list: list[str],
+                  subject: str, html: str,
+                  attachments=None) -> str:
+    """
+    Send one email. Returns 'sent' or raises Exception.
+
+    attachments: list of (filename: str, pdf_bytes: bytes) tuples, or None.
+    When attachments are present the email is sent as multipart/mixed so
+    both the HTML body and the PDF files are included.
+    """
+    if attachments:
+        # outer: mixed (body + attachments)
+        msg = MIMEMultipart("mixed")
+        alt = MIMEMultipart("alternative")
+        alt.attach(MIMEText(html, "html"))
+        msg.attach(alt)
+        for fname, fbytes in attachments:
+            part = MIMEBase("application", "pdf")
+            part.set_payload(fbytes)
+            encoders.encode_base64(part)
+            part.add_header("Content-Disposition", "attachment",
+                            filename=fname)
+            msg.attach(part)
+    else:
+        msg = MIMEMultipart("alternative")
+        msg.attach(MIMEText(html, "html"))
+
+    msg["Subject"] = subject
+    msg["From"]    = smtp_cfg["sender"]
+    msg["To"]      = to
+    msg["Cc"]      = ", ".join(cc_list)
+
+    recipients = [to] + cc_list
+    ctx = ssl.create_default_context()
+
+    last_err = None
+    for attempt in range(1, 4):          # up to 3 attempts
+        try:
+            if smtp_cfg.get("use_tls", True):
+                with smtplib.SMTP(smtp_cfg["host"], smtp_cfg["port"], timeout=60) as s:
+                    s.ehlo()
+                    s.starttls(context=ctx)
+                    s.ehlo()
+                    s.login(smtp_cfg["user"], smtp_cfg["password"])
+                    s.sendmail(smtp_cfg["sender"], recipients, msg.as_string())
+            else:
+                with smtplib.SMTP_SSL(smtp_cfg["host"], smtp_cfg["port"],
+                                      context=ctx, timeout=60) as s:
+                    s.login(smtp_cfg["user"], smtp_cfg["password"])
+                    s.sendmail(smtp_cfg["sender"], recipients, msg.as_string())
+            return "sent"                # success — exit immediately
+        except (smtplib.SMTPServerDisconnected,
+                smtplib.SMTPConnectError,
+                TimeoutError,
+                OSError) as e:
+            last_err = e
+            if attempt < 3:
+                import time; time.sleep(3 * attempt)   # back-off: 3s, 6s
+            continue
+        except Exception as e:
+            raise e                      # non-retryable (auth, bad address, etc.)
+
+    raise last_err                       # all retries exhausted
+
+
+# build_customer_email_html removed — replaced by build_email()
+
+
+# ── Zoho Books helpers ────────────────────────────────────────────────────────
+@st.cache_data(ttl=3000, show_spinner=False)   # cache token ~50 min; Zoho tokens live 60 min
+def get_zoho_token(client_id: str, client_secret: str,
+                   refresh_token: str, dc: str) -> str:
+    """Exchange a Zoho refresh token for a fresh access token."""
+    auth_host, _ = ZOHO_DC_MAP.get(dc, ZOHO_DC_MAP["US (.com)"])
+    resp = requests.post(
+        f"https://{auth_host}/oauth/v2/token",
+        data={
+            "grant_type":    "refresh_token",
+            "client_id":     client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+        },
+        timeout=20,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if "access_token" not in data:
+        raise ValueError(f"Zoho token error: {data.get('error', data)}")
+    return data["access_token"]
+
+
+# All known Zoho Books field names for the invoice / payment URL.
+# invoice_url is the standard field; others are tried as fallbacks.
+_PAYMENT_LINK_FIELDS = [
+    "invoice_url",          # standard Zoho Books field — tried first
+    "invoiceurl",
+    "payment_link",
+    "zohosecurepay_link",
+    "online_payment_link",
+    "secure_payment_url",
+    "invoice_payment_link",
+    "paymentlink",
+]
+
+def _extract_payment_link(obj: dict) -> str:
+    """Try every known field name; return the first non-empty URL found."""
+    for field in _PAYMENT_LINK_FIELDS:
+        val = str(obj.get(field, "") or "").strip()
+        if val.startswith("http"):
+            return val
+    # Last-resort: scan all string values for a zoho secure-pay URL pattern
+    for val in obj.values():
+        s = str(val or "")
+        if "zoho" in s.lower() and "secure" in s.lower() and s.startswith("http"):
+            return s
+    return ""
+
+
+def _zoho_invoice_id_and_link(invoice_number: str, access_token: str,
+                               org_ids: list, api_host: str):
+    """
+    Internal helper. Searches across org_ids for invoice_number.
+    Returns (invoice_id, org_id_found, payment_link) or raises on error.
+    Returns (None, None, None) only when invoice is not found in any org.
+    """
+    base    = f"https://{api_host}/books/v3"
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+
+    for org_id in org_ids:
+        org_id = str(org_id).strip()
+        if not org_id:
+            continue
+
+        # Step 1 — search by invoice number
+        sr = requests.get(
+            f"{base}/invoices",
+            params={"invoice_number": invoice_number, "organization_id": org_id},
+            headers=headers,
+            timeout=25,
+        )
+        sr.raise_for_status()
+        sr_data  = sr.json()
+        inv_list = sr_data.get("invoices", [])
+        if not inv_list:
+            continue                        # not in this org — try next
+
+        invoice_id = inv_list[0]["invoice_id"]
+
+        # Check if payment_link is already in the list response (saves one call)
+        link_from_list = _extract_payment_link(inv_list[0])
+        if link_from_list:
+            return invoice_id, org_id, link_from_list
+
+        # Step 2 — fetch full invoice detail for payment_link
+        dr = requests.get(
+            f"{base}/invoices/{invoice_id}",
+            params={"organization_id": org_id},
+            headers=headers,
+            timeout=25,
+        )
+        dr.raise_for_status()
+        inv_detail   = dr.json().get("invoice", {})
+        payment_link = _extract_payment_link(inv_detail)
+
+        return invoice_id, org_id, payment_link
+
+    return None, None, None
+
+
+def fetch_zoho_invoice_pdf(invoice_number: str, access_token: str,
+                            org_ids: list, dc: str):
+    """
+    Fetch the PDF for *invoice_number* from Zoho Books.
+    Also captures the payment_link (SecurePay URL) from the invoice detail.
+    Returns (pdf_bytes, invoice_id, org_id_used, payment_link) on success.
+    Returns (None, None, None, None) when the invoice isn't found in any org.
+    Raises on network/auth errors.
+    """
+    _, api_host = ZOHO_DC_MAP.get(dc, ZOHO_DC_MAP["US (.com)"])
+    base    = f"https://{api_host}/books/v3"
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+
+    invoice_id, org_id, payment_link = _zoho_invoice_id_and_link(
+        invoice_number, access_token, org_ids, api_host
+    )
+    if not invoice_id:
+        return None, None, None, None       # not found in any org
+
+    # Download PDF
+    pdf_resp = requests.get(
+        f"{base}/invoices/{invoice_id}",
+        params={"organization_id": org_id, "accept": "pdf"},
+        headers=headers,
+        timeout=40,
+    )
+    pdf_resp.raise_for_status()
+    return pdf_resp.content, invoice_id, org_id, payment_link
+
+
+def fetch_zoho_payment_links(invoice_numbers: list, access_token: str,
+                              org_ids: list, dc: str) -> tuple:
+    """
+    Batch-fetch Zoho SecurePay payment links for a list of invoice numbers.
+    Lightweight — no PDF download, just JSON API calls.
+
+    Returns (links_dict, errors_dict):
+      links_dict  = {invoice_number: payment_link}   — found links
+      errors_dict = {invoice_number: error_message}  — fetch failures
+    """
+    _, api_host = ZOHO_DC_MAP.get(dc, ZOHO_DC_MAP["US (.com)"])
+    links  = {}
+    errors = {}
+    for inv_num in invoice_numbers:
+        inv_num = str(inv_num).strip()
+        if not inv_num or inv_num in links:
+            continue
+        try:
+            _, _, payment_link = _zoho_invoice_id_and_link(
+                inv_num, access_token, org_ids, api_host
+            )
+            if payment_link:
+                links[inv_num] = payment_link
+            else:
+                errors[inv_num] = "Found in Zoho but no payment link field present"
+        except Exception as e:
+            errors[inv_num] = str(e)
+    return links, errors
+
+
+def init_db():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS reasons (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                level           TEXT NOT NULL,
+                identifier      TEXT NOT NULL,
+                reason_category TEXT,
+                reason_text     TEXT,
+                action_owner    TEXT,
+                next_action_date TEXT,
+                updated_at      TEXT,
+                UNIQUE(level, identifier)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sent_emails (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                invoice_no   TEXT,
+                customer     TEXT,
+                to_email     TEXT,
+                cc_emails    TEXT,
+                subject      TEXT,
+                sent_at      TEXT,
+                status       TEXT,
+                error        TEXT
+            )
+        """)
+
+
+def log_email(invoice_no, customer, to_email, cc_emails, subject, status, error=""):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            INSERT INTO sent_emails
+                (invoice_no, customer, to_email, cc_emails, subject, sent_at, status, error)
+            VALUES (?,?,?,?,?,?,?,?)
+        """, (invoice_no, customer, to_email, cc_emails, subject,
+              datetime.now().isoformat(), status, error))
+
+
+def get_sent_log():
+    with sqlite3.connect(DB_PATH) as conn:
+        return pd.read_sql(
+            "SELECT * FROM sent_emails ORDER BY sent_at DESC", conn
+        )
+
+
+def upsert_reason(level, identifier, category, text, owner, next_dt):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            INSERT INTO reasons
+                (level, identifier, reason_category, reason_text, action_owner, next_action_date, updated_at)
+            VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(level, identifier) DO UPDATE SET
+                reason_category  = excluded.reason_category,
+                reason_text      = excluded.reason_text,
+                action_owner     = excluded.action_owner,
+                next_action_date = excluded.next_action_date,
+                updated_at       = excluded.updated_at
+        """, (level, identifier, category, text, owner, str(next_dt), datetime.now().isoformat()))
+
+
+def delete_reason(level, identifier):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM reasons WHERE level=? AND identifier=?", (level, identifier))
+
+
+def get_reasons(level=None):
+    with sqlite3.connect(DB_PATH) as conn:
+        if level:
+            return pd.read_sql("SELECT * FROM reasons WHERE level=? ORDER BY updated_at DESC", conn, params=(level,))
+        return pd.read_sql("SELECT * FROM reasons ORDER BY updated_at DESC", conn)
+
+
+# ── Data loading ──────────────────────────────────────────────────────────────
+# Canonical column name → list of accepted aliases (all lowercase, stripped)
+COLUMN_ALIASES = {
+    "Entity Name":               ["entity name", "entity"],
+    "EnterprisesID":             ["enterprisesid", "enterprise id", "enterprise_id", "eid"],
+    "customer_name":             ["customer name", "customer_name", "customername", "client name", "client_name"],
+    "Status":                    ["status", "invoice status"],
+    "customer_status":           ["customer status", "customer_status", "client status"],
+    "invoice_number":            ["invoice number", "invoice_number", "invoice no", "invoice no.", "inv number", "inv no"],
+    "Product":                   ["product", "product name", "plan"],
+    "date":                      ["date", "invoice date", "invoice_date"],
+    "due_date":                  ["due date", "due_date", "payment due", "payment due date"],
+    "email":                     ["email", "email address", "billing email"],
+    "country":                   ["country", "region"],
+    "created_by":                ["created by", "created_by"],
+    "currency_code":             ["currency code", "currency_code", "currency"],
+    "total":                     ["total", "invoice total", "gross amount"],
+    "balance":                   ["balance", "remaining balance"],
+    "Outstanding":               ["outstanding", "outstanding amount"],
+    "last_payment_date":         ["last payment date", "last_payment_date", "last payment"],
+    "Billing Terms":             ["billing terms", "billing_terms", "payment terms"],
+    "Service Type":              ["service type", "service_type"],
+    "Service_period_Start_date": ["service period start date", "service_period_start_date",
+                                  "service start date", "service start", "start date"],
+    "Service_period_End_date":   ["service period end date", "service_period_end_date",
+                                  "service end date", "service end", "end date"],
+    "Final USD":                 ["final usd", "final_usd", "amount usd", "usd amount", "outstanding usd"],
+    "CSM":                       ["csm", "customer success manager", "account manager", "am"],
+    "CSM Email":                 ["csm email", "csm_email", "csm email address"],
+    "payment_link":              ["zohosecurepay", "zoho secure pay", "zoho securepay",
+                                  "payment link", "payment_link", "pay link", "pay_link",
+                                  "secure pay link", "secure payment link", "payment url"],
+}
+
+def remap_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename df columns to canonical names using case-insensitive alias matching."""
+    lookup = {}
+    for canonical, aliases in COLUMN_ALIASES.items():
+        for alias in aliases:
+            lookup[alias] = canonical
+
+    rename_map = {}
+    for col in df.columns:
+        key = col.lower().strip()
+        if key in lookup and col != lookup[key]:
+            rename_map[col] = lookup[key]
+
+    return df.rename(columns=rename_map)
+
+
+@st.cache_data(show_spinner="Loading data…")
+def load_data(file_bytes):
+    df = pd.read_excel(BytesIO(file_bytes))
+
+    # Normalise column names: strip whitespace, remove non-breaking spaces
+    df.columns = [str(c).strip().replace("\xa0", " ") for c in df.columns]
+
+    # De-duplicate column names (customer_status appears twice in spec)
+    cols = []
+    seen = {}
+    for c in df.columns:
+        if c in seen:
+            seen[c] += 1
+            cols.append(f"{c}_{seen[c]}")
+        else:
+            seen[c] = 0
+            cols.append(c)
+    df.columns = cols
+
+    # Remap aliases → canonical names
+    df = remap_columns(df)
+
+    # Show actual column names in sidebar for debugging
+    st.session_state["_raw_cols"] = list(df.columns)
+
+    date_cols = ["due_date", "date", "last_payment_date",
+                 "Service_period_Start_date", "Service_period_End_date"]
+    for col in date_cols:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+
+    num_cols = ["Final USD", "total", "balance", "Outstanding"]
+    for col in num_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    # ── Aging: Today - Invoice Date if invoice date > service start, else Today - Service Start ──
+    today = pd.Timestamp.today().normalize()
+    if "date" in df.columns and "Service_period_Start_date" in df.columns:
+        inv_after_start = df["date"] > df["Service_period_Start_date"]
+        days_from_invoice = (today - df["date"]).dt.days
+        days_from_start   = (today - df["Service_period_Start_date"]).dt.days
+        df["Aging"] = np.where(inv_after_start, days_from_invoice, days_from_start).clip(min=0)
+    elif "date" in df.columns:
+        df["Aging"] = (today - df["date"]).dt.days.clip(lower=0)
+    else:
+        df["Aging"] = 0
+
+    # ── Bucket ────────────────────────────────────────────────────────────────
+    def aging_bucket(a):
+        if a <= 15:  return "0-15"
+        if a <= 30:  return "16-30"
+        if a <= 45:  return "31-45"
+        if a <= 60:  return "46-60"
+        if a <= 90:  return "61-90"
+        return "90+"
+
+    df["Bucket"] = df["Aging"].apply(aging_bucket)
+
+    # ── RAG: customer-level, then broadcast to invoice rows ───────────────────
+    # Red   → customer has ANY invoice in 90+ bucket
+    # Amber → customer has ANY invoice with aging > 30 (and not Red)
+    # Green → all invoices ≤ 30 days
+    OVER_90 = {"90+"}
+    OVER_30 = {"31-45", "46-60", "61-90", "90+"}
+
+    def customer_rag(buckets_set):
+        if buckets_set & OVER_90: return "Red"
+        if buckets_set & OVER_30: return "Amber"
+        return "Green"
+
+    # Auto-detect the customer name column (case-insensitive, strip)
+    cust_col = next(
+        (c for c in df.columns if c.lower().replace(" ", "_") == "customer_name"),
+        None
+    )
+    if cust_col is None:
+        # Fallback: pick first column whose name contains "customer"
+        cust_col = next((c for c in df.columns if "customer" in c.lower()), None)
+
+    if cust_col:
+        if cust_col != "customer_name":
+            df = df.rename(columns={cust_col: "customer_name"})
+        customer_buckets = df.groupby("customer_name")["Bucket"].apply(set)
+        rag_map = customer_buckets.apply(customer_rag)
+        df["RAG"] = df["customer_name"].map(rag_map)
+    else:
+        df["RAG"] = "Green"
+
+    return df
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def fmt_usd(val):
+    if abs(val) >= 1_000_000:
+        return f"${val/1_000_000:.2f}M"
+    if abs(val) >= 1_000:
+        return f"${val/1_000:.1f}K"
+    return f"${val:,.0f}"
+
+def fmt_inr(val):
+    if abs(val) >= 1_000_0000:        # 1 Crore
+        return f"₹{val/1_000_0000:.2f}Cr"
+    if abs(val) >= 1_00_000:          # 1 Lakh
+        return f"₹{val/1_00_000:.2f}L"
+    if abs(val) >= 1_000:
+        return f"₹{val/1_000:.1f}K"
+    return f"₹{val:,.0f}"
+
+
+def rag_badge(val):
+    icons = {"Red": "🔴", "Amber": "🟡", "Green": "🟢"}
+    return f"{icons.get(str(val), '⚪')} {val}"
+
+
+def export_excel(df):
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
+    return buf.getvalue()
+
+
+# ── Column-level filter widget (reusable) ────────────────────────────────────
+def column_filters(df: pd.DataFrame, key_prefix: str = "cf") -> pd.DataFrame:
+    """
+    Renders one filter widget per column (text / multiselect / range) in a
+    compact expander above the table and returns the filtered DataFrame.
+    Columns with ≤30 unique values → multiselect
+    Numeric columns              → min/max number inputs
+    Other columns                → case-insensitive text search
+    """
+    with st.expander("🔍 Column Filters", expanded=False):
+        filtered = df.copy()
+        n_cols = len(df.columns)
+        # layout: up to 4 widgets per row
+        cols_per_row = 4
+        col_chunks = [list(df.columns)[i:i+cols_per_row]
+                      for i in range(0, n_cols, cols_per_row)]
+
+        for chunk in col_chunks:
+            row = st.columns(len(chunk))
+            for widget_col, col_name in zip(row, chunk):
+                series = df[col_name].dropna()
+                unique_vals = series.unique()
+                widget_key = f"{key_prefix}_{col_name}"
+
+                with widget_col:
+                    if pd.api.types.is_numeric_dtype(df[col_name]):
+                        col_min = float(series.min()) if len(series) else 0.0
+                        col_max = float(series.max()) if len(series) else 0.0
+                        if col_min == col_max:
+                            continue  # nothing to filter
+                        lo = st.number_input(
+                            f"{col_name} ≥", value=col_min,
+                            min_value=col_min, max_value=col_max,
+                            step=max((col_max - col_min) / 100, 0.01),
+                            key=f"{widget_key}_lo", label_visibility="visible",
+                        )
+                        hi = st.number_input(
+                            f"{col_name} ≤", value=col_max,
+                            min_value=col_min, max_value=col_max,
+                            step=max((col_max - col_min) / 100, 0.01),
+                            key=f"{widget_key}_hi", label_visibility="visible",
+                        )
+                        if lo > col_min or hi < col_max:
+                            filtered = filtered[
+                                (filtered[col_name] >= lo) & (filtered[col_name] <= hi)
+                            ]
+                    elif len(unique_vals) <= 30:
+                        choices = st.multiselect(
+                            col_name,
+                            options=sorted([str(v) for v in unique_vals]),
+                            default=[],
+                            key=widget_key,
+                        )
+                        if choices:
+                            filtered = filtered[
+                                filtered[col_name].astype(str).isin(choices)
+                            ]
+                    else:
+                        text = st.text_input(
+                            col_name, value="", key=widget_key,
+                            placeholder="search…",
+                        )
+                        if text.strip():
+                            filtered = filtered[
+                                filtered[col_name].astype(str)
+                                    .str.contains(text.strip(), case=False, na=False)
+                            ]
+        return filtered
+
+
+# ── Reason form (reusable) ────────────────────────────────────────────────────
+def reason_form(level: str, identifiers, label: str):
+    existing_all = get_reasons(level)
+
+    left, right = st.columns([2, 3])
+    with left:
+        selected = st.selectbox(f"Select {label}", sorted([str(x) for x in identifiers if pd.notna(x)]), key=f"sel_{level}")
+
+    existing_row = (
+        existing_all[existing_all["identifier"] == selected]
+        if not existing_all.empty else pd.DataFrame()
+    )
+    existing = existing_row.iloc[0].to_dict() if not existing_row.empty else {}
+
+    with right:
+        if existing:
+            st.success(f"✅ Reason on record — last updated {str(existing.get('updated_at',''))[:10]}")
+
+    with st.form(f"form_{level}_{selected}", clear_on_submit=False):
+        default_cat = existing.get("reason_category", REASON_CATEGORIES[0])
+        cat_idx = REASON_CATEGORIES.index(default_cat) if default_cat in REASON_CATEGORIES else 0
+
+        cat = st.selectbox("Reason Category", REASON_CATEGORIES, index=cat_idx)
+        notes = st.text_area("Notes / Details", value=existing.get("reason_text", ""), height=100)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            owner = st.text_input("Action Owner", value=existing.get("action_owner", ""))
+        with c2:
+            raw_date = existing.get("next_action_date")
+            try:
+                default_date = date.fromisoformat(str(raw_date)[:10]) if raw_date else date.today()
+            except Exception:
+                default_date = date.today()
+            next_dt = st.date_input("Next Action Date", value=default_date)
+
+        col_save, col_del = st.columns([3, 1])
+        with col_save:
+            if st.form_submit_button("💾  Save", use_container_width=True, type="primary"):
+                upsert_reason(level, selected, cat, notes, owner, next_dt)
+                st.success("Saved!")
+                st.rerun()
+        with col_del:
+            if existing and st.form_submit_button("🗑 Delete", use_container_width=True):
+                delete_reason(level, selected)
+                st.warning("Deleted.")
+                st.rerun()
+
+    st.divider()
+
+    if not existing_all.empty:
+        st.subheader(f"All saved {label}-level reasons")
+        display = existing_all[["identifier", "reason_category", "reason_text",
+                                 "action_owner", "next_action_date", "updated_at"]].copy()
+        display.columns = [label, "Category", "Notes", "Owner", "Next Action", "Last Updated"]
+        display["Last Updated"] = display["Last Updated"].str[:10]
+        display["Next Action"] = display["Next Action"].str[:10]
+        st.dataframe(display, use_container_width=True, height=300)
+
+        dl_bytes = export_excel(display)
+        st.download_button(
+            f"⬇ Download {label} Reasons",
+            data=dl_bytes,
+            file_name=f"{level}_reasons.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    else:
+        st.info(f"No {label}-level reasons saved yet.")
+
+
+# ── Google Sheets helpers ─────────────────────────────────────────────────────
+def parse_gsheet_url(url: str):
+    """Return (spreadsheet_id, gid) from any Google Sheets URL, or raise ValueError."""
+    match = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", url)
+    if not match:
+        raise ValueError("Could not find a spreadsheet ID in the URL.")
+    sheet_id = match.group(1)
+    gid_match = re.search(r"[#&?]gid=(\d+)", url)
+    gid = gid_match.group(1) if gid_match else "0"
+    return sheet_id, gid
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_gsheet(url: str) -> bytes:
+    """Download a Google Sheet as xlsx bytes (sheet must be publicly shared). Cached 2 min."""
+    sheet_id, gid = parse_gsheet_url(url)
+    export_url = (
+        f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+        f"/export?format=xlsx&gid={gid}"
+    )
+    resp = requests.get(export_url, timeout=30)
+    if resp.status_code == 401:
+        raise PermissionError(
+            "Sheet is private. Share it as 'Anyone with the link can view' and try again."
+        )
+    if resp.status_code != 200:
+        raise ConnectionError(f"Google returned HTTP {resp.status_code}. Check the URL.")
+    return resp.content
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_gsheet_private(url: str, creds_json: str) -> bytes:
+    """Download a private Google Sheet using a service-account JSON string. Cached 2 min."""
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        import json
+    except ImportError:
+        raise ImportError("Run:  pip install gspread google-auth")
+
+    scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    info = json.loads(creds_json)
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
+    gc = gspread.authorize(creds)
+    sheet_id, gid = parse_gsheet_url(url)
+    sh = gc.open_by_key(sheet_id)
+    worksheet = next((ws for ws in sh.worksheets() if str(ws.id) == gid), sh.sheet1)
+    records = worksheet.get_all_records()
+    buf = BytesIO()
+    pd.DataFrame(records).to_excel(buf, index=False)
+    return buf.getvalue()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN APP
+# ─────────────────────────────────────────────────────────────────────────────
+init_db()
+load_credentials()   # populate session_state from credentials.json (first run only)
+
+st.title("📊 AR Collections Dashboard")
+
+# ── Data source selector ──────────────────────────────────────────────────────
+src = st.radio("Data source", ["📁 Upload Excel / CSV", "🔗 Google Sheets URL"],
+               horizontal=True, label_visibility="collapsed")
+
+file_bytes = None
+
+if src == "📁 Upload Excel / CSV":
+    uploaded = st.file_uploader("Upload Excel file", type=["xlsx", "xls"],
+                                label_visibility="collapsed")
+    if uploaded:
+        file_bytes = uploaded.read()
+
+else:  # Google Sheets
+    gs_url = st.text_input(
+        "Google Sheets URL",
+        placeholder="https://docs.google.com/spreadsheets/d/…/edit",
+        help="The sheet must be shared as 'Anyone with the link can view' for public access.",
+    )
+
+    use_private = st.checkbox("Private sheet — use Service Account credentials")
+    creds_file  = None
+    if use_private:
+        st.markdown(
+            "Upload your **service account JSON** key file. "
+            "[How to create one](https://docs.gspread.org/en/latest/oauth2.html#for-bots-using-service-account)"
+        )
+        creds_file = st.file_uploader("Service account JSON", type=["json"],
+                                      label_visibility="collapsed")
+
+    if gs_url:
+        # ── Auto-refresh every 2 minutes ──────────────────────────────────────
+        if _AUTOREFRESH_AVAILABLE:
+            _refresh_count = _st_autorefresh(interval=120_000, key="gs_autorefresh")
+        else:
+            _refresh_count = 0
+
+        with st.spinner("Fetching from Google Sheets…"):
+            try:
+                if use_private and creds_file:
+                    _creds_json = creds_file.read().decode()
+                    file_bytes = fetch_gsheet_private(gs_url, _creds_json)
+                elif use_private:
+                    st.warning("Upload your service account JSON key to access a private sheet.")
+                else:
+                    file_bytes = fetch_gsheet(gs_url)
+
+                if file_bytes:
+                    # Track last successful refresh time
+                    st.session_state["_gs_last_refresh"] = time.time()
+
+            except PermissionError as e:
+                st.error(str(e))
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+        # ── Status bar ────────────────────────────────────────────────────────
+        _last = st.session_state.get("_gs_last_refresh")
+        if _last:
+            _ago = int(time.time() - _last)
+            _next_in = max(0, 120 - _ago)
+            if _AUTOREFRESH_AVAILABLE:
+                st.caption(
+                    f"🔄 Auto-refresh every **2 min** · "
+                    f"Last refreshed: **{datetime.fromtimestamp(_last).strftime('%H:%M:%S')}** · "
+                    f"Next refresh in **{_next_in}s**"
+                )
+            else:
+                st.caption(
+                    f"⚠️ Install `streamlit-autorefresh` for auto-refresh · "
+                    f"Last loaded: {datetime.fromtimestamp(_last).strftime('%H:%M:%S')}"
+                )
+        elif file_bytes:
+            st.success("Sheet loaded successfully.")
+
+if not file_bytes:
+    st.markdown("""
+    ### Getting started
+    **Option 1 — Upload a file:** drag your Excel (.xlsx) file onto the uploader above.
+
+    **Option 2 — Google Sheets:** paste a Sheets URL. The sheet must be set to
+    *"Anyone with the link → Viewer"*. For private sheets, upload a service account JSON key.
+
+    The file should contain columns like:
+    `invoice_number` · `customer_name` · `CSM` · `Final USD` · `date`
+    · `Service_period_Start_date` · `due_date` · `Status` · `country` · `Product`
+    """)
+    st.stop()
+
+df = load_data(file_bytes)
+
+# ── Exclude fully-paid / zero-balance invoices everywhere ─────────────────────
+if "balance" in df.columns:
+    df = df[df["balance"].fillna(0) > 0].copy()
+
+# ── Keep only Overdue / Sent invoices (based on Current Invoice Status) ────────
+if "Current Invoice Status" in df.columns:
+    _status_norm = df["Current Invoice Status"].astype(str).str.strip().str.lower()
+    df = df[_status_norm.isin(["overdue", "sent"])].copy()
+elif "Status" in df.columns:
+    # fallback: try the Status column
+    _status_norm = df["Status"].astype(str).str.strip().str.lower()
+    df = df[_status_norm.isin(["overdue", "sent"])].copy()
+
+# ─── Column presence helpers ──────────────────────────────────────────────────
+def col(name):
+    """Return df[name] if it exists, else an empty Series."""
+    return df[name] if name in df.columns else pd.Series(dtype=str)
+
+def fcol(name):
+    """Return fdf[name] if it exists, else an empty Series."""
+    return fdf[name] if name in fdf.columns else pd.Series(dtype=str)
+
+# ─── Missing critical columns warning ────────────────────────────────────────
+CRITICAL = ["customer_name", "invoice_number", "CSM", "Final USD"]
+missing  = [c for c in CRITICAL if c not in df.columns]
+if missing:
+    st.warning(
+        f"⚠️ Could not find these expected columns: **{', '.join(missing)}**\n\n"
+        f"Columns detected: `{'` · `'.join(df.columns.tolist())}`\n\n"
+        "Check the **Detected columns** expander in the sidebar. "
+        "Rename your sheet headers to match or ask for help."
+    )
+
+# ─── Sidebar filters (global) ─────────────────────────────────────────────────
+with st.sidebar:
+    st.header("Global Filters")
+    csm_options = sorted(col("CSM").dropna().unique())
+    csm_sel = st.multiselect("CSM", csm_options)
+
+    rag_options = sorted(col("RAG").dropna().unique())
+    rag_sel = st.multiselect("RAG Status", rag_options)
+
+    bucket_options = [b for b in BUCKET_ORDER if b in col("Bucket").values]
+    bucket_sel = st.multiselect("Aging Bucket", bucket_options)
+
+    country_options = sorted(col("country").dropna().unique())
+    country_sel = st.multiselect("Country", country_options)
+
+    product_options = sorted(col("Product").dropna().unique())
+    product_sel = st.multiselect("Product", product_options)
+
+    st.divider()
+    cust_count = df["customer_name"].nunique() if "customer_name" in df.columns else "?"
+    st.caption(f"Dataset: **{len(df):,}** invoices · **{cust_count}** customers")
+
+    with st.expander("🔍 Detected columns"):
+        raw = st.session_state.get("_raw_cols", list(df.columns))
+        st.write(raw)
+
+    st.divider()
+    st.subheader("📧 Gmail SMTP")
+    with st.expander("Configure Gmail", expanded=False):
+        st.markdown("""
+**Setup (one-time):**
+1. Go to [Google App Passwords](https://myaccount.google.com/apppasswords)
+2. Select *Mail* → *Other* → name it `AR Dashboard`
+3. Copy the 16-character password and paste below
+""")
+        smtp_host   = st.text_input("SMTP Host", value="smtp.gmail.com",        key="smtp_host",   disabled=True)
+        smtp_port   = st.number_input("Port",    value=587, step=1,             key="smtp_port",   disabled=True)
+        smtp_user   = st.text_input("Gmail Address", placeholder="you@gmail.com",
+                                    value=st.session_state.get("smtp_user",""), key="smtp_user")
+        smtp_pass   = st.text_input("App Password (16 chars)",
+                                    value=st.session_state.get("smtp_pass",""),
+                                    type="password",                            key="smtp_pass")
+        smtp_sender = st.text_input("From Name / Email",
+                                    value=st.session_state.get("smtp_sender","finance@spyne.ai"),
+                                    key="smtp_sender")
+        st.session_state["smtp_tls"] = True   # Gmail always uses STARTTLS on 587
+
+        if smtp_user and smtp_pass:
+            st.success("✅ Gmail credentials loaded.")
+            if st.button("💾 Save Gmail Credentials", key="save_gmail_btn",
+                         use_container_width=True):
+                save_credentials()
+                st.success("Saved to credentials.json — will auto-load on next restart.")
+        else:
+            st.warning("Enter your Gmail address and App Password to enable sending.")
+
+    # Expose SMTP config as a dict for use in the tab
+    SMTP_CFG = {
+        "host":     "smtp.gmail.com",
+        "port":     587,
+        "user":     st.session_state.get("smtp_user",   ""),
+        "password": st.session_state.get("smtp_pass",   ""),
+        "sender":   st.session_state.get("smtp_sender", "finance@spyne.ai"),
+        "use_tls":  True,
+    }
+
+    st.divider()
+    st.subheader("📎 Zoho Books")
+    with st.expander("Configure Zoho Books", expanded=False):
+        st.markdown("""
+**Step-by-step setup:**
+1. Open [Zoho API Console](https://api-console.zoho.in) *(India)* or [api-console.zoho.com](https://api-console.zoho.com) *(US/other)*
+2. Click **Self Client** → **Create**
+3. **Scope:** `ZohoBooks.invoices.READ`  ·  **Time Duration:** 10 minutes  → **Create**
+4. Copy the **one-time code** shown, then run this command in a terminal to exchange it for a refresh token:
+```
+POST https://accounts.zoho.in/oauth/v2/token
+  grant_type=authorization_code
+  client_id=YOUR_CLIENT_ID
+  client_secret=YOUR_CLIENT_SECRET
+  redirect_uri=https://www.zoho.in
+  code=THE_ONE_TIME_CODE
+```
+5. From the response, copy `refresh_token` and paste below.
+6. **Organization ID:** Zoho Books → Settings ⚙️ → Organization Profile → *Org ID*
+""")
+
+        st.markdown("---")
+        st.markdown("**⚠️ `invalid_client` troubleshooting:**")
+        st.markdown("""
+- Make sure **Data Center** below matches where your Zoho account is
+  (Indian accounts → `India (.in)`)
+- Client ID / Secret must come from the **same** API Console as your data center
+- Paste the **Refresh Token** (from step 5 above), NOT the one-time authorization code
+- Remove any leading/trailing spaces when pasting credentials
+""")
+        st.markdown("---")
+
+        zoho_dc_sel = st.selectbox(
+            "Data Center", list(ZOHO_DC_MAP.keys()),
+            index=0, key="zoho_dc",
+            help="Must match the Zoho region your account belongs to",
+        )
+
+        st.markdown("**Organization IDs** *(you can enter up to 2 — both will be searched)*")
+        zc1, zc2 = st.columns(2)
+        with zc1:
+            st.text_input(
+                "Primary Org ID",
+                value=st.session_state.get("zoho_org_id_1", ""),
+                placeholder="e.g. 123456789",
+                key="zoho_org_id_1",
+            )
+        with zc2:
+            st.text_input(
+                "Secondary Org ID (optional)",
+                value=st.session_state.get("zoho_org_id_2", ""),
+                placeholder="e.g. 987654321",
+                key="zoho_org_id_2",
+            )
+
+        st.text_input(
+            "Client ID",
+            value=st.session_state.get("zoho_client_id", ""),
+            key="zoho_client_id",
+        )
+        st.text_input(
+            "Client Secret",
+            value=st.session_state.get("zoho_client_secret", ""),
+            type="password",
+            key="zoho_client_secret",
+        )
+        # Apply exchanged token BEFORE the widget renders (Streamlit rule: can't
+        # write to a widget key after it's instantiated, so we stage it here).
+        if "_zoho_rt_pending" in st.session_state:
+            st.session_state["zoho_refresh_token"] = st.session_state.pop("_zoho_rt_pending")
+
+        st.text_input(
+            "Refresh Token",
+            value=st.session_state.get("zoho_refresh_token", ""),
+            type="password",
+            key="zoho_refresh_token",
+            help="This is the long-lived token — NOT the one-time code. Use the exchange tool below if you only have the code.",
+        )
+
+        # ── In-app code → refresh-token exchange (no terminal needed) ─────────
+        with st.expander("🔄 Exchange Authorization Code → Refresh Token", expanded=False):
+            st.markdown("""
+**When to use this:**
+After clicking *Generate Code* in Zoho API Console (Self Client), paste
+the code here. The app exchanges it for a **Refresh Token** and saves it
+automatically.
+
+> ⚠️ Codes expire in **~10 minutes** — exchange immediately.
+
+**`invalid_code` error?** The code was already used or expired.
+Go back to API Console, generate a fresh code, and paste it here right away.
+""")
+            auth_code_input = st.text_input(
+                "One-time Authorization Code",
+                placeholder="1000.xxxxxxxxxxxxxxxx.xxxxxxxx",
+                key="zoho_auth_code_input",
+            )
+            redirect_uri_input = st.text_input(
+                "Redirect URI (must match what you used when generating the code)",
+                value="https://www.zoho.in",
+                key="zoho_redirect_uri",
+            )
+            if st.button("⚡ Exchange Code for Refresh Token", key="zoho_exchange_btn",
+                         use_container_width=True):
+                _cid_ex  = st.session_state.get("zoho_client_id",     "").strip()
+                _csec_ex = st.session_state.get("zoho_client_secret", "").strip()
+                _dc_ex   = st.session_state.get("zoho_dc", "US (.com)")
+                _code_ex = auth_code_input.strip()
+                if not all([_cid_ex, _csec_ex, _code_ex]):
+                    st.error("Fill in Client ID, Client Secret, and the Authorization Code first.")
+                else:
+                    auth_host_ex, _ = ZOHO_DC_MAP.get(_dc_ex, ZOHO_DC_MAP["US (.com)"])
+                    try:
+                        ex_resp = requests.post(
+                            f"https://{auth_host_ex}/oauth/v2/token",
+                            data={
+                                "grant_type":    "authorization_code",
+                                "client_id":     _cid_ex,
+                                "client_secret": _csec_ex,
+                                "redirect_uri":  redirect_uri_input.strip(),
+                                "code":          _code_ex,
+                            },
+                            timeout=20,
+                        )
+                        ex_resp.raise_for_status()
+                        ex_data = ex_resp.json()
+                        if "refresh_token" in ex_data:
+                            # Stage the token; it will be applied before the
+                            # widget renders on the next rerun (avoids the
+                            # "cannot modify after widget instantiated" error).
+                            st.session_state["_zoho_rt_pending"] = ex_data["refresh_token"]
+                            st.success(
+                                "✅ Refresh Token saved! You can now close this section "
+                                "and use 'Test Connection'."
+                            )
+                            st.rerun()
+                        else:
+                            err_code = ex_data.get("error", str(ex_data))
+                            hints = {
+                                "invalid_code":   "The code is expired or already used. Generate a **new code** in Zoho API Console and paste it immediately.",
+                                "invalid_client": "Client ID or Secret doesn't match the selected Data Center. Re-check both.",
+                            }
+                            st.error(f"Exchange failed: `{err_code}`")
+                            if err_code in hints:
+                                st.warning(hints[err_code])
+                    except Exception as ex_err:
+                        st.error(f"Request error: {ex_err}")
+
+        # ── Compute readiness flags ────────────────────────────────────────────
+        _z_org1  = st.session_state.get("zoho_org_id_1", "").strip()
+        _z_cid   = st.session_state.get("zoho_client_id", "").strip()
+        _z_csec  = st.session_state.get("zoho_client_secret", "").strip()
+        _z_rtok  = st.session_state.get("zoho_refresh_token", "").strip()
+
+        zoho_ready = all([_z_org1, _z_cid, _z_csec, _z_rtok])
+        if zoho_ready:
+            st.success("✅ Zoho Books configured — invoice PDFs can be attached.")
+            tcol1, tcol2 = st.columns(2)
+            with tcol1:
+                if st.button("🔑 Test Connection", key="zoho_test_btn",
+                             use_container_width=True):
+                    try:
+                        get_zoho_token.clear()   # force fresh request
+                        tok = get_zoho_token(_z_cid, _z_csec, _z_rtok,
+                                             st.session_state.get("zoho_dc", "US (.com)"))
+                        st.success(f"✅ Connected! Token: {tok[:12]}…")
+                    except Exception as ex:
+                        err = str(ex)
+                        st.error(f"❌ {err}")
+                        hints = {
+                            "invalid_client": "Client ID/Secret wrong or wrong Data Center selected.",
+                            "invalid_code":   "You pasted the one-time code as the Refresh Token. Use the 'Exchange Code' tool above.",
+                        }
+                        for key, msg in hints.items():
+                            if key in err:
+                                st.warning(f"**Hint:** {msg}")
+            with tcol2:
+                if st.button("🔄 Clear Token Cache", key="zoho_clear_cache",
+                             use_container_width=True):
+                    get_zoho_token.clear()
+                    st.info("Cache cleared — fresh token will be fetched on next send.")
+
+            if st.button("💾 Save Zoho Credentials", key="save_zoho_btn",
+                         use_container_width=True, type="primary"):
+                save_credentials()
+                st.success("Saved to credentials.json — will auto-load on next restart.")
+        else:
+            st.caption("Fill Primary Org ID + Client ID + Client Secret + Refresh Token to enable PDF attachment.")
+
+        # ── Debug: inspect raw Zoho API response for any invoice ──────────────
+        if zoho_ready:
+            with st.expander("🔍 Debug — Inspect invoice API response", expanded=False):
+                st.caption("Use this to find the exact field name Zoho uses for the payment link in your account.")
+                debug_inv_no = st.text_input(
+                    "Invoice Number to inspect",
+                    placeholder="e.g. INV-000001",
+                    key="zoho_debug_inv",
+                )
+                if st.button("🔍 Fetch & Show Raw Response", key="zoho_debug_btn",
+                             use_container_width=True):
+                    if not debug_inv_no.strip():
+                        st.error("Enter an invoice number.")
+                    else:
+                        try:
+                            _dbg_dc  = st.session_state.get("zoho_dc", "US (.com)")
+                            _dbg_tok = get_zoho_token(_z_cid, _z_csec, _z_rtok, _dbg_dc)
+                            _, _dbg_api = ZOHO_DC_MAP.get(_dbg_dc, ZOHO_DC_MAP["US (.com)"])
+                            _dbg_base   = f"https://{_dbg_api}/books/v3"
+                            _dbg_hdrs   = {"Authorization": f"Zoho-oauthtoken {_dbg_tok}"}
+                            _dbg_orgs   = [o.strip() for o in [
+                                st.session_state.get("zoho_org_id_1",""),
+                                st.session_state.get("zoho_org_id_2",""),
+                            ] if o.strip()]
+
+                            for _dbg_org in _dbg_orgs:
+                                sr = requests.get(
+                                    f"{_dbg_base}/invoices",
+                                    params={"invoice_number": debug_inv_no.strip(),
+                                            "organization_id": _dbg_org},
+                                    headers=_dbg_hdrs, timeout=20,
+                                )
+                                _dbg_list = sr.json().get("invoices", [])
+                                if not _dbg_list:
+                                    st.warning(f"Org {_dbg_org}: invoice not found.")
+                                    continue
+
+                                _dbg_id = _dbg_list[0]["invoice_id"]
+                                st.success(f"Found in Org **{_dbg_org}** · invoice_id: `{_dbg_id}`")
+
+                                # Show list-response fields related to payment
+                                st.markdown("**Fields in list response (payment-related):**")
+                                pfields = {k: v for k, v in _dbg_list[0].items()
+                                           if any(x in k.lower() for x in
+                                                  ["pay", "link", "url", "secure", "online"])}
+                                st.json(pfields if pfields else {"note": "No payment-related fields in list response"})
+
+                                # Fetch full detail
+                                dr = requests.get(
+                                    f"{_dbg_base}/invoices/{_dbg_id}",
+                                    params={"organization_id": _dbg_org},
+                                    headers=_dbg_hdrs, timeout=20,
+                                )
+                                _dbg_detail = dr.json().get("invoice", {})
+
+                                st.markdown("**Fields in detail response (payment-related):**")
+                                pfields2 = {k: v for k, v in _dbg_detail.items()
+                                            if any(x in k.lower() for x in
+                                                   ["pay", "link", "url", "secure", "online"])}
+                                st.json(pfields2 if pfields2 else {"note": "No payment-related fields in detail response"})
+
+                                st.markdown("**Full detail response (all fields):**")
+                                st.json(_dbg_detail)
+                                break
+                        except Exception as dbg_err:
+                            st.error(f"Debug fetch failed: {dbg_err}")
+
+    # Build org_ids list (filter empty)
+    _org_ids = [o.strip() for o in [
+        st.session_state.get("zoho_org_id_1", ""),
+        st.session_state.get("zoho_org_id_2", ""),
+    ] if o.strip()]
+
+    ZOHO_CFG = {
+        "org_ids":       _org_ids,
+        "client_id":     st.session_state.get("zoho_client_id",     "").strip(),
+        "client_secret": st.session_state.get("zoho_client_secret", "").strip(),
+        "refresh_token": st.session_state.get("zoho_refresh_token", "").strip(),
+        "dc":            st.session_state.get("zoho_dc", "US (.com)"),
+    }
+    ZOHO_READY = all([ZOHO_CFG["org_ids"], ZOHO_CFG["client_id"],
+                      ZOHO_CFG["client_secret"], ZOHO_CFG["refresh_token"]])
+
+# Apply global filters
+fdf = df.copy()
+if csm_sel:       fdf = fdf[fdf["CSM"].isin(csm_sel)]           if "CSM"          in fdf.columns else fdf
+if rag_sel:       fdf = fdf[fdf["RAG"].isin(rag_sel)]           if "RAG"          in fdf.columns else fdf
+if bucket_sel:    fdf = fdf[fdf["Bucket"].isin(bucket_sel)]     if "Bucket"       in fdf.columns else fdf
+if country_sel:   fdf = fdf[fdf["country"].isin(country_sel)]   if "country"      in fdf.columns else fdf
+if product_sel:   fdf = fdf[fdf["Product"].isin(product_sel)]
+
+# ── TABS ──────────────────────────────────────────────────────────────────────
+tab_overview, tab_csm, tab_customer, tab_invoices, tab_reasons, tab_email = st.tabs([
+    "📈 Overview",
+    "👤 CSM Summary",
+    "🏢 Customer Summary",
+    "🔍 Invoice Drilldown",
+    "📝 Reasons & Actions",
+    "📧 Send Reminders",
+])
+
+# ─────────────────────────── TAB 1 · OVERVIEW ────────────────────────────────
+with tab_overview:
+    total_inr   = fdf["Outstanding"].sum() if "Outstanding" in fdf.columns else 0
+    n_invoices  = len(fdf)
+    n_customers = fdf["customer_name"].nunique() if "customer_name" in fdf.columns else 0
+    n_csms      = fdf["CSM"].nunique()           if "CSM"           in fdf.columns else 0
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Outstanding (INR)", fmt_inr(total_inr))
+    k2.metric("Invoices",          f"{n_invoices:,}")
+    k3.metric("Customers",         f"{n_customers:,}")
+    k4.metric("CSMs",              f"{n_csms:,}")
+
+    st.divider()
+    c1, c2 = st.columns(2)
+
+    with c1:
+        if "RAG" in fdf.columns:
+            rag_data = fdf.groupby("RAG")["Final USD"].sum().reset_index()
+            fig = px.pie(
+                rag_data, values="Final USD", names="RAG",
+                title="Outstanding by RAG Status",
+                color="RAG",
+                color_discrete_map=RAG_COLORS,
+                hole=0.4,
+            )
+            fig.update_traces(textinfo="percent+label")
+            st.plotly_chart(fig, use_container_width=True)
+
+    with c2:
+        if "Bucket" in fdf.columns and "RAG" in fdf.columns:
+            bucket_rag = (
+                fdf.groupby(["Bucket", "RAG"])["Final USD"]
+                .sum()
+                .reset_index()
+            )
+            # Enforce correct bucket order
+            bucket_rag["Bucket"] = pd.Categorical(bucket_rag["Bucket"], categories=BUCKET_ORDER, ordered=True)
+            bucket_rag = bucket_rag.sort_values("Bucket")
+            fig = px.bar(
+                bucket_rag, x="Bucket", y="Final USD", color="RAG",
+                title="Outstanding by Aging Bucket & RAG",
+                color_discrete_map=RAG_COLORS,
+                category_orders={"Bucket": BUCKET_ORDER, "RAG": ["Green", "Amber", "Red"]},
+                text_auto=".2s",
+            )
+            fig.update_layout(xaxis_title="", yaxis_title="USD", legend_title="RAG")
+            st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+
+    # ── Bucket × RAG summary table ────────────────────────────────────────────
+    if "Bucket" in fdf.columns and "RAG" in fdf.columns:
+        st.subheader("Aging Bucket × RAG Breakdown")
+        pivot = (
+            fdf.groupby(["Bucket", "RAG"])["Final USD"]
+            .sum()
+            .unstack(fill_value=0)
+            .reindex(BUCKET_ORDER)
+        )
+        # Add totals
+        for col in ["Red", "Amber", "Green"]:
+            if col not in pivot.columns:
+                pivot[col] = 0
+        pivot = pivot[["Green", "Amber", "Red"]]
+        pivot["Total"] = pivot.sum(axis=1)
+        pivot.loc["Grand Total"] = pivot.sum()
+
+        fmt_map = {c: "${:,.0f}" for c in pivot.columns}
+        def _col_color(col):
+            colors = {"Green": "color:#10b981;font-weight:600",
+                      "Amber": "color:#f59e0b;font-weight:600",
+                      "Red":   "color:#ef4444;font-weight:600"}
+            return [colors.get(col.name, "")] * len(col)
+
+        styled = pivot.style.format(fmt_map).apply(_col_color, axis=0)
+        st.dataframe(styled, use_container_width=True)
+
+    c3, c4 = st.columns(2)
+
+    with c3:
+        if "country" in fdf.columns:
+            country_data = (fdf.groupby("country")["Final USD"].sum()
+                             .reset_index()
+                             .sort_values("Final USD", ascending=False)
+                             .head(10))
+            fig = px.bar(country_data, x="Final USD", y="country",
+                         orientation="h", title="Top 10 Countries by Outstanding",
+                         text_auto=".2s")
+            fig.update_layout(yaxis=dict(autorange="reversed"), yaxis_title="")
+            st.plotly_chart(fig, use_container_width=True)
+
+    with c4:
+        if "Product" in fdf.columns:
+            product_data = (fdf.groupby("Product")["Final USD"].sum()
+                              .reset_index()
+                              .sort_values("Final USD", ascending=False)
+                              .head(10))
+            fig = px.bar(product_data, x="Final USD", y="Product",
+                         orientation="h", title="Top 10 Products by Outstanding",
+                         text_auto=".2s")
+            fig.update_layout(yaxis=dict(autorange="reversed"), yaxis_title="")
+            st.plotly_chart(fig, use_container_width=True)
+
+    # ── Currency-wise outstanding (FC) with RAG ───────────────────────────────
+    if "currency_code" in fdf.columns and "balance" in fdf.columns and "RAG" in fdf.columns:
+        st.divider()
+        st.subheader("Currency-wise Outstanding (FC) by RAG")
+
+        curr_rag = (
+            fdf.groupby(["currency_code", "RAG"])["balance"]
+            .sum()
+            .reset_index()
+            .sort_values("balance", ascending=False)
+        )
+
+        cc1, cc2 = st.columns(2)
+
+        with cc1:
+            fig = px.bar(
+                curr_rag, x="currency_code", y="balance", color="RAG",
+                title="FC Outstanding by Currency & RAG",
+                color_discrete_map=RAG_COLORS,
+                category_orders={"RAG": ["Green", "Amber", "Red"]},
+                text_auto=".2s",
+            )
+            fig.update_layout(
+                xaxis_title="Currency", yaxis_title="FC Amount",
+                legend_title="RAG", xaxis_tickangle=-30,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        with cc2:
+            # Pivot: currency rows × RAG columns
+            pivot_curr = (
+                curr_rag.pivot_table(index="currency_code", columns="RAG",
+                                     values="balance", aggfunc="sum", fill_value=0)
+                .reset_index()
+            )
+            for r in ["Green", "Amber", "Red"]:
+                if r not in pivot_curr.columns:
+                    pivot_curr[r] = 0
+            pivot_curr = pivot_curr[["currency_code", "Green", "Amber", "Red"]]
+            pivot_curr["Total (FC)"] = pivot_curr[["Green","Amber","Red"]].sum(axis=1)
+            pivot_curr = pivot_curr.sort_values("Total (FC)", ascending=False)
+
+            # Append totals row
+            totals = {"currency_code": "Grand Total",
+                      "Green": pivot_curr["Green"].sum(),
+                      "Amber": pivot_curr["Amber"].sum(),
+                      "Red":   pivot_curr["Red"].sum(),
+                      "Total (FC)": pivot_curr["Total (FC)"].sum()}
+            pivot_curr = pd.concat([pivot_curr, pd.DataFrame([totals])], ignore_index=True)
+
+            CURRENCY_SYMBOLS = {
+                "INR": "₹", "USD": "$", "EUR": "€", "GBP": "£",
+                "AUD": "A$", "CAD": "C$", "NZD": "NZ$", "SGD": "S$",
+                "HKD": "HK$", "JPY": "¥", "CNY": "¥", "CHF": "CHF ",
+                "NOK": "kr ", "SEK": "kr ", "DKK": "kr ", "AED": "AED ",
+                "SAR": "﷼", "MYR": "RM ", "THB": "฿", "IDR": "Rp ",
+                "PHP": "₱", "KRW": "₩", "BRL": "R$", "MXN": "MX$",
+                "ZAR": "R ",
+            }
+
+            def fmt_currency_val(val, currency):
+                sym = CURRENCY_SYMBOLS.get(str(currency).upper(), "")
+                return f"{sym}{val:,.0f}"
+
+            def _rag_style(col):
+                colors = {"Green": "color:#34d399;font-weight:600",
+                          "Amber": "color:#fbbf24;font-weight:600",
+                          "Red":   "color:#f87171;font-weight:600"}
+                return [colors.get(col.name, "")] * len(col)
+
+            # Format each row with its own currency symbol
+            display_curr = pivot_curr.rename(columns={"currency_code": "Currency"}).copy()
+            for num_col in ["Green", "Amber", "Red", "Total (FC)"]:
+                display_curr[num_col] = display_curr.apply(
+                    lambda r: fmt_currency_val(r[num_col],
+                        r["Currency"] if r["Currency"] != "Grand Total" else ""),
+                    axis=1,
+                )
+
+            st.dataframe(
+                display_curr.style.apply(_rag_style, axis=0),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+# ─────────────────────────── TAB 2 · CSM SUMMARY ─────────────────────────────
+with tab_csm:
+    # ── Pick value column ─────────────────────────────────────────────────────
+    val_col = "Outstanding" if "Outstanding" in fdf.columns else "Final USD"
+    val_fmt = "₹{:,.0f}"   if val_col == "Outstanding"      else "${:,.0f}"
+
+    # ── Base aggregation using simple identifier names, then rename ───────────
+    grp = fdf.groupby("CSM")
+    csm_df = pd.DataFrame()
+    csm_df["CSM"]              = grp[val_col].sum().index
+    csm_df = csm_df.set_index("CSM")
+    csm_df["Total Outstanding"] = grp[val_col].sum()
+    csm_df["Avg Aging (days)"]  = grp["Aging"].mean()                    if "Aging"          in fdf.columns else 0
+    csm_df["No. of Invoices"]   = grp["invoice_number"].count()          if "invoice_number" in fdf.columns else 0
+    csm_df["No. of Customers"]  = grp["customer_name"].nunique()         if "customer_name"  in fdf.columns else 0
+    csm_df = csm_df.reset_index()
+
+    # ── RAG breakdown ─────────────────────────────────────────────────────────
+    if "RAG" in fdf.columns:
+        for rag in ["Red", "Amber", "Green"]:
+            sub = fdf[fdf["RAG"] == rag].groupby("CSM")[val_col].sum().rename(f"{rag} Outstanding")
+            csm_df = csm_df.merge(sub, on="CSM", how="left")
+            csm_df[f"{rag} Outstanding"] = csm_df[f"{rag} Outstanding"].fillna(0)
+
+    csm_df = csm_df.sort_values("Total Outstanding", ascending=False)
+
+    # ── Column order ──────────────────────────────────────────────────────────
+    rag_out_cols = [c for c in ["Red Outstanding", "Amber Outstanding", "Green Outstanding"]
+                    if c in csm_df.columns]
+    col_order = (["CSM", "Total Outstanding"]
+                 + rag_out_cols
+                 + ["Avg Aging (days)", "No. of Invoices", "No. of Customers"])
+    csm_df = csm_df[[c for c in col_order if c in csm_df.columns]]
+
+    # ── Search ────────────────────────────────────────────────────────────────
+    search = st.text_input("🔍 Search CSM", placeholder="Type to filter…")
+    show_df = csm_df[csm_df["CSM"].str.contains(search, case=False, na=False)] if search else csm_df
+
+    # ── Format & style ────────────────────────────────────────────────────────
+    fmt_map = {
+        "Total Outstanding": val_fmt,
+        "Avg Aging (days)":  "{:.0f}",
+        "No. of Invoices":   "{:,.0f}",
+        "No. of Customers":  "{:,.0f}",
+    }
+    for c in rag_out_cols:
+        fmt_map[c] = val_fmt
+
+    def _rag_col_style(col):
+        colors = {
+            "Red":   "color:#f87171;font-weight:700",
+            "Amber": "color:#fbbf24;font-weight:700",
+            "Green": "color:#34d399;font-weight:700",
+        }
+        for key, style in colors.items():
+            if col.name.startswith(key):
+                return [style] * len(col)
+        return [""] * len(col)
+
+    st.dataframe(
+        show_df.style.format(fmt_map).apply(_rag_col_style, axis=0),
+        use_container_width=True,
+        height=min(80 + len(show_df) * 35, 520),
+        hide_index=True,
+    )
+
+    st.download_button(
+        "⬇ Download CSM Summary",
+        data=export_excel(show_df),
+        file_name="csm_summary.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    st.divider()
+
+    # ── Bar chart – top CSMs ──────────────────────────────────────────────────
+    _csm_max = max(len(csm_df), 1)
+    top_n = st.slider("Show top N CSMs", 5, max(5, min(30, _csm_max)), min(15, max(5, _csm_max))) if _csm_max > 5 else _csm_max
+    fig = px.bar(
+        csm_df.head(top_n), x="CSM", y="Total Outstanding",
+        title=f"Top {top_n} CSMs by Outstanding",
+        color="Total Outstanding", color_continuous_scale="Reds",
+        text_auto=".2s",
+    )
+    fig.update_layout(xaxis_tickangle=-30, coloraxis_showscale=False)
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── Stacked RAG bar ───────────────────────────────────────────────────────
+    if rag_out_cols:
+        st.subheader("RAG Breakdown per CSM")
+        melted = csm_df.head(top_n).melt(
+            id_vars="CSM", value_vars=rag_out_cols, var_name="RAG", value_name="Amount"
+        )
+        melted["RAG"] = melted["RAG"].apply(lambda x: x.split()[0])  # strip suffix
+        fig2 = px.bar(melted, x="CSM", y="Amount", color="RAG",
+                      color_discrete_map=RAG_COLORS,
+                      title="Outstanding by RAG per CSM", text_auto=".2s",
+                      labels={"Amount": "Outstanding (₹)" if val_col == "Outstanding" else "Outstanding (USD)"})
+        fig2.update_layout(xaxis_tickangle=-30)
+        st.plotly_chart(fig2, use_container_width=True)
+
+    st.divider()
+    st.subheader("CSM Deep Dive")
+    selected_csm = st.selectbox("Select a CSM to drill in", sorted(fdf["CSM"].dropna().unique()))
+    csm_detail = fdf[fdf["CSM"] == selected_csm]
+
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("Outstanding (INR)", fmt_inr(csm_detail["Outstanding"].sum()) if "Outstanding" in csm_detail.columns else "—")
+    d2.metric("Outstanding (USD)", fmt_usd(csm_detail["Final USD"].sum()) if "Final USD" in csm_detail.columns else "—")
+    d3.metric("Invoices", len(csm_detail))
+    d4.metric("Customers", csm_detail["customer_name"].nunique())
+
+    show_cols = [c for c in ["invoice_number","customer_name","Outstanding","Final USD","Aging","Bucket","RAG","due_date","Status","Product","country"] if c in csm_detail.columns]
+    csm_detail_show = csm_detail[show_cols].sort_values("Final USD", ascending=False)
+    csm_detail_show = column_filters(csm_detail_show, key_prefix="csm_dd")
+    st.dataframe(csm_detail_show, use_container_width=True)
+
+# ─────────────────────────── TAB 3 · CUSTOMER SUMMARY ───────────────────────
+with tab_customer:
+    val_col_c = "Outstanding" if "Outstanding" in fdf.columns else "Final USD"
+    val_fmt_c = "₹{:,.0f}"   if val_col_c == "Outstanding"   else "${:,.0f}"
+    val_lbl_c = "Outstanding (₹)" if val_col_c == "Outstanding" else "Outstanding (USD)"
+
+    # ── Aggregation ───────────────────────────────────────────────────────────
+    grp_c = fdf.groupby("customer_name")
+    cust_df = pd.DataFrame()
+    cust_df["Customer"]           = grp_c[val_col_c].sum().index
+    cust_df = cust_df.set_index("Customer")
+    cust_df["Total Outstanding"]  = grp_c[val_col_c].sum()
+    cust_df["Avg Aging (days)"]   = grp_c["Aging"].mean()               if "Aging"          in fdf.columns else 0
+    cust_df["No. of Invoices"]    = grp_c["invoice_number"].count()     if "invoice_number" in fdf.columns else 0
+    # CSM — take the most frequent CSM per customer
+    if "CSM" in fdf.columns:
+        cust_df["CSM"] = fdf.groupby("customer_name")["CSM"].agg(
+            lambda x: x.value_counts().index[0] if len(x) else ""
+        )
+    # Country
+    if "country" in fdf.columns:
+        cust_df["Country"] = fdf.groupby("customer_name")["country"].agg(
+            lambda x: x.value_counts().index[0] if len(x) else ""
+        )
+    cust_df = cust_df.reset_index()
+
+    # ── RAG breakdown ─────────────────────────────────────────────────────────
+    if "RAG" in fdf.columns:
+        for rag in ["Red", "Amber", "Green"]:
+            sub = (fdf[fdf["RAG"] == rag]
+                   .groupby("customer_name")[val_col_c].sum()
+                   .rename(f"{rag} Outstanding"))
+            cust_df = cust_df.merge(sub, left_on="Customer",
+                                    right_on="customer_name", how="left")
+            cust_df[f"{rag} Outstanding"] = cust_df[f"{rag} Outstanding"].fillna(0)
+
+    cust_df = cust_df.sort_values("Total Outstanding", ascending=False)
+
+    # ── Column order ──────────────────────────────────────────────────────────
+    rag_out_cols_c = [c for c in ["Red Outstanding", "Amber Outstanding", "Green Outstanding"]
+                      if c in cust_df.columns]
+    col_order_c = (["Customer"]
+                   + (["CSM"] if "CSM" in cust_df.columns else [])
+                   + (["Country"] if "Country" in cust_df.columns else [])
+                   + ["Total Outstanding"]
+                   + rag_out_cols_c
+                   + ["Avg Aging (days)", "No. of Invoices"])
+    cust_df = cust_df[[c for c in col_order_c if c in cust_df.columns]]
+
+    # ── Top KPIs ──────────────────────────────────────────────────────────────
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Total Customers",    f"{len(cust_df):,}")
+    k2.metric("Total Outstanding",  fmt_inr(cust_df["Total Outstanding"].sum()) if val_col_c == "Outstanding"
+                                    else fmt_usd(cust_df["Total Outstanding"].sum()))
+    k3.metric("Avg Outstanding/Customer",
+              fmt_inr(cust_df["Total Outstanding"].mean()) if val_col_c == "Outstanding"
+              else fmt_usd(cust_df["Total Outstanding"].mean()))
+    k4.metric("Avg Aging (days)",   f"{cust_df['Avg Aging (days)'].mean():.0f}" if "Avg Aging (days)" in cust_df.columns else "—")
+
+    st.divider()
+
+    # ── Filters row ───────────────────────────────────────────────────────────
+    fc1, fc2, fc3 = st.columns([2, 2, 2])
+    with fc1:
+        csm_filter = st.multiselect("Filter by CSM", sorted(fdf["CSM"].dropna().unique()),
+                                    key="cust_csm_filter") if "CSM" in fdf.columns else []
+    with fc2:
+        rag_filter = st.multiselect("Filter by RAG", ["Red", "Amber", "Green"],
+                                    key="cust_rag_filter") if "RAG" in fdf.columns else []
+    with fc3:
+        search_c = st.text_input("🔍 Search Customer", placeholder="Type to filter…", key="cust_search")
+
+    show_cust = cust_df.copy()
+    if csm_filter:
+        show_cust = show_cust[show_cust["CSM"].isin(csm_filter)]
+    if rag_filter:
+        # keep customers that have ANY invoice in the selected RAG buckets
+        cust_in_rag = fdf[fdf["RAG"].isin(rag_filter)]["customer_name"].unique()
+        show_cust = show_cust[show_cust["Customer"].isin(cust_in_rag)]
+    if search_c:
+        show_cust = show_cust[show_cust["Customer"].str.contains(search_c, case=False, na=False)]
+
+    # ── Format & style ────────────────────────────────────────────────────────
+    fmt_map_c = {
+        "Total Outstanding": val_fmt_c,
+        "Avg Aging (days)":  "{:.0f}",
+        "No. of Invoices":   "{:,.0f}",
+    }
+    for c in rag_out_cols_c:
+        fmt_map_c[c] = val_fmt_c
+
+    def _rag_cust_style(col):
+        colors = {
+            "Red":   "color:#f87171;font-weight:700",
+            "Amber": "color:#fbbf24;font-weight:700",
+            "Green": "color:#34d399;font-weight:700",
+        }
+        for key, style in colors.items():
+            if col.name.startswith(key):
+                return [style] * len(col)
+        return [""] * len(col)
+
+    st.dataframe(
+        show_cust.style.format(fmt_map_c).apply(_rag_cust_style, axis=0),
+        use_container_width=True,
+        height=min(80 + len(show_cust) * 35, 520),
+        hide_index=True,
+    )
+
+    st.download_button(
+        "⬇ Download Customer Summary",
+        data=export_excel(show_cust),
+        file_name="customer_summary.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    st.divider()
+
+    # ── Bar chart – top customers ──────────────────────────────────────────────
+    _cust_max = max(len(cust_df), 1)
+    if _cust_max <= 5:
+        top_n_c = _cust_max
+    else:
+        top_n_c = st.slider("Show top N customers", 5, min(30, _cust_max), min(15, _cust_max),
+                            key="cust_top_n")
+    fig_c = px.bar(
+        cust_df.head(top_n_c), x="Customer", y="Total Outstanding",
+        title=f"Top {top_n_c} Customers by Outstanding",
+        color="Total Outstanding", color_continuous_scale="Reds",
+        text_auto=".2s",
+    )
+    fig_c.update_layout(xaxis_tickangle=-30, coloraxis_showscale=False)
+    st.plotly_chart(fig_c, use_container_width=True)
+
+    # ── Stacked RAG bar ───────────────────────────────────────────────────────
+    if rag_out_cols_c:
+        st.subheader("RAG Breakdown per Customer")
+        melted_c = cust_df.head(top_n_c).melt(
+            id_vars="Customer", value_vars=rag_out_cols_c, var_name="RAG", value_name="Amount"
+        )
+        melted_c["RAG"] = melted_c["RAG"].apply(lambda x: x.split()[0])
+        fig_c2 = px.bar(
+            melted_c, x="Customer", y="Amount", color="RAG",
+            color_discrete_map=RAG_COLORS,
+            title="Outstanding by RAG per Customer", text_auto=".2s",
+            labels={"Amount": val_lbl_c},
+        )
+        fig_c2.update_layout(xaxis_tickangle=-30)
+        st.plotly_chart(fig_c2, use_container_width=True)
+
+    st.divider()
+
+    # ── Customer Deep Dive ────────────────────────────────────────────────────
+    st.subheader("Customer Deep Dive")
+    selected_cust = st.selectbox(
+        "Select a customer to drill in",
+        sorted(fdf["customer_name"].dropna().unique()),
+        key="cust_deep_select",
+    )
+    cust_detail = fdf[fdf["customer_name"] == selected_cust]
+
+    cd1, cd2, cd3, cd4 = st.columns(4)
+    cd1.metric("Outstanding (INR)", fmt_inr(cust_detail["Outstanding"].sum())
+               if "Outstanding" in cust_detail.columns else "—")
+    cd2.metric("Outstanding (USD)", fmt_usd(cust_detail["Final USD"].sum())
+               if "Final USD" in cust_detail.columns else "—")
+    cd3.metric("Invoices", len(cust_detail))
+    cd4.metric("CSM", cust_detail["CSM"].mode()[0] if "CSM" in cust_detail.columns and len(cust_detail) else "—")
+
+    dd_cols = [c for c in [
+        "invoice_number", "CSM", "currency_code", "Outstanding", "Final USD",
+        "Aging", "Bucket", "RAG", "due_date", "Status", "Product", "country",
+    ] if c in cust_detail.columns]
+    cust_detail_show = cust_detail[dd_cols].sort_values(
+        "Outstanding" if "Outstanding" in dd_cols else dd_cols[0], ascending=False
+    )
+    cust_detail_show = column_filters(cust_detail_show, key_prefix="cust_dd")
+    st.dataframe(cust_detail_show, use_container_width=True)
+
+
+# ─────────────────────────── TAB 4 · INVOICE DRILLDOWN ───────────────────────
+with tab_invoices:
+    f1, f2, f3, f4 = st.columns(4)
+    with f1:
+        inv_csm = st.multiselect("CSM", sorted(fdf["CSM"].dropna().unique()), key="inv_csm")
+    with f2:
+        inv_rag = st.multiselect("RAG", sorted(fdf["RAG"].dropna().unique()) if "RAG" in fdf.columns else [], key="inv_rag")
+    with f3:
+        inv_bkt = st.multiselect("Bucket", [b for b in BUCKET_ORDER if b in fdf.get("Bucket", pd.Series()).values], key="inv_bkt")
+    with f4:
+        inv_status = st.multiselect("Status", sorted(fdf["Status"].dropna().unique()) if "Status" in fdf.columns else [], key="inv_status")
+
+    filtered = fdf.copy()
+    if inv_csm:    filtered = filtered[filtered["CSM"].isin(inv_csm)]
+    if inv_rag:    filtered = filtered[filtered["RAG"].isin(inv_rag)]
+    if inv_bkt:    filtered = filtered[filtered["Bucket"].isin(inv_bkt)]
+    if inv_status: filtered = filtered[filtered["Status"].isin(inv_status)]
+
+    if "balance" in filtered.columns and len(filtered):
+        min_v, max_v = float(filtered["balance"].min()), float(filtered["balance"].max())
+        if min_v < max_v:
+            rng = st.slider("Filter by Balance Amount (FC)", min_v, max_v, (min_v, max_v), step=100.0)
+            filtered = filtered[(filtered["balance"] >= rng[0]) & (filtered["balance"] <= rng[1])]
+
+    total_inr_disp = fmt_inr(filtered["Outstanding"].sum()) if "Outstanding" in filtered.columns else "—"
+    st.caption(f"Showing **{len(filtered):,}** invoices — Outstanding (INR): **{total_inr_disp}**")
+
+    # ── Merge saved invoice-level reasons into the table ──────────────────────
+    inv_reasons = get_reasons("invoice")
+    base_cols = [c for c in [
+        "invoice_number", "customer_name", "CSM",
+        "currency_code", "balance",               # native currency amount
+        "Aging", "Bucket", "RAG", "due_date", "Status",
+        "Product", "country", "Billing Terms", "Service Type",
+    ] if c in filtered.columns]
+
+    display = filtered[base_cols].sort_values("balance", ascending=False).copy()
+    display["invoice_number"] = display["invoice_number"].astype(str)
+
+    # Build a formatted "Amount" column: currency symbol + balance
+    if "balance" in display.columns and "currency_code" in display.columns:
+        display["Amount"] = display.apply(
+            lambda r: f"{CURR_SYM.get(str(r['currency_code']).upper(), '')}{r['balance']:,.0f}",
+            axis=1,
+        )
+        # keep balance as numeric for sort/slider but show Amount as the readable column
+        display = display.drop(columns=["balance"])
+        # reorder: put Amount right after CSM
+        cols_order = ["invoice_number","customer_name","CSM","Amount","currency_code",
+                      "Aging","Bucket","RAG","due_date","Status",
+                      "Product","country","Billing Terms","Service Type"]
+        display = display[[c for c in cols_order if c in display.columns]]
+
+    # Attach existing reason columns
+    if not inv_reasons.empty:
+        inv_reasons = inv_reasons.rename(columns={
+            "identifier":      "invoice_number",
+            "reason_category": "Reason Category",
+            "reason_text":     "Notes",
+            "action_owner":    "Action Owner",
+            "next_action_date":"Next Action Date",
+        })[["invoice_number","Reason Category","Notes","Action Owner","Next Action Date"]]
+        display = display.merge(inv_reasons, on="invoice_number", how="left")
+    else:
+        display["Reason Category"] = None
+        display["Notes"]           = None
+        display["Action Owner"]    = None
+        display["Next Action Date"]= None
+
+    display["Reason Category"]  = display["Reason Category"].astype(str).replace("nan","")
+    display["Notes"]            = display["Notes"].astype(str).replace("nan","")
+    display["Action Owner"]     = display["Action Owner"].astype(str).replace("nan","")
+    display["Next Action Date"] = display["Next Action Date"].astype(str).replace("nan","")
+
+    # ── Column filters ────────────────────────────────────────────────────────
+    display = column_filters(display, key_prefix="inv_dd")
+
+    # ── Editable table ────────────────────────────────────────────────────────
+    st.info("Edit **Reason Category**, **Notes**, **Action Owner**, and **Next Action Date** inline. Click **Save Changes** when done.")
+
+    edited = st.data_editor(
+        display,
+        use_container_width=True,
+        height=480,
+        disabled=[c for c in display.columns if c not in
+                  ["Reason Category", "Notes", "Action Owner", "Next Action Date"]],
+        column_config={
+            "Amount":    st.column_config.TextColumn("Amount (FC)"),
+            "Aging":     st.column_config.NumberColumn("Aging (days)", format="%d"),
+            "due_date":  st.column_config.DateColumn("Due Date"),
+            "Reason Category": st.column_config.SelectboxColumn(
+                "Reason Category",
+                options=[""] + REASON_CATEGORIES,
+                required=False,
+            ),
+            "Notes":           st.column_config.TextColumn("Notes", max_chars=500),
+            "Action Owner":    st.column_config.TextColumn("Action Owner"),
+            "Next Action Date":st.column_config.TextColumn("Next Action Date", help="YYYY-MM-DD"),
+        },
+        key="invoice_editor",
+    )
+
+    if st.button("💾 Save Changes", type="primary", key="save_inv"):
+        saved, skipped = 0, 0
+        for _, row in edited.iterrows():
+            inv = str(row["invoice_number"])
+            cat   = str(row.get("Reason Category", "") or "")
+            notes = str(row.get("Notes", "") or "")
+            owner = str(row.get("Action Owner", "") or "")
+            ndate = str(row.get("Next Action Date", "") or "")
+            if any([cat, notes, owner, ndate]):
+                try:
+                    upsert_reason("invoice", inv, cat, notes, owner, ndate)
+                    saved += 1
+                except Exception:
+                    skipped += 1
+        st.success(f"Saved {saved} invoice reason(s)." + (f" {skipped} skipped." if skipped else ""))
+        st.rerun()
+
+    st.download_button(
+        "⬇ Download with Reasons",
+        data=export_excel(edited),
+        file_name="invoices_with_reasons.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+# ─────────────────────────── TAB 4 · REASONS & ACTIONS ───────────────────────
+with tab_reasons:
+    rt1, rt2, rt3 = st.tabs(["🧾 Invoice Level", "🏢 Customer Level", "👤 CSM Level"])
+
+    with rt1:
+        st.markdown("Mark a reason / action for a specific **invoice**.")
+        reason_form("invoice", df["invoice_number"].dropna().unique(), "Invoice")
+
+    with rt2:
+        st.markdown("Mark a reason / action for a specific **customer**.")
+        reason_form("customer", df["customer_name"].dropna().unique(), "Customer")
+
+    with rt3:
+        st.markdown("Mark a reason / action for a specific **CSM**.")
+        reason_form("csm", df["CSM"].dropna().unique(), "CSM")
+
+# ─────────────────────────── TAB 5 · SEND REMINDERS ─────────────────────────
+with tab_email:
+
+    smtp_ready = all([SMTP_CFG.get("user"), SMTP_CFG.get("password")])
+    if not smtp_ready:
+        st.warning("⚙️ Enter your Gmail address and App Password in the **sidebar → Gmail SMTP** section before sending.")
+
+    # ── Template & recipient config (shared across both sub-tabs) ─────────────
+    cfg1, cfg2 = st.columns([2, 3])
+    with cfg1:
+        selected_template = st.selectbox(
+            "📋 Email Template",
+            list(TEMPLATES.keys()),
+            help="Choose the tone and content of your email",
+        )
+        template_key = TEMPLATES[selected_template]
+
+    with cfg2:
+        st.markdown("**Recipients**")
+        rc1, rc2, rc3, rc4 = st.columns(4)
+        send_to_customer = rc1.checkbox("✉️ Customer",         value=True, key="rc_customer")
+        send_to_csm      = rc2.checkbox("👤 CSM",              value=True, key="rc_csm")
+        send_to_finance  = rc3.checkbox("🏦 finance@spyne.ai", value=True, key="rc_finance")
+        send_to_other    = rc4.checkbox("📨 Other",            value=False, key="rc_other")
+
+        other_email = ""
+        if send_to_other:
+            other_email = st.text_input(
+                "Additional email address",
+                placeholder="e.g. manager@company.com",
+                key="rc_other_email",
+                label_visibility="collapsed",
+            ).strip()
+            if send_to_other and other_email and "@" not in other_email:
+                st.warning("⚠️ Enter a valid email address for the additional recipient.")
+
+        if not any([send_to_customer, send_to_csm, send_to_finance,
+                    (send_to_other and other_email and "@" in other_email)]):
+            st.error("Select at least one recipient.")
+
+    st.divider()
+    et1, et2, et3 = st.tabs(["🏢 By Customer", "🧾 By Invoice", "📋 Sent Log"])
+
+    def _build_cc(csm_email: str) -> list:
+        """Build CC list based on recipient toggles."""
+        cc = []
+        if send_to_csm and csm_email and "@" in csm_email:
+            cc.append(csm_email)
+        if send_to_finance:
+            cc.append(FINANCE_CC)
+        if send_to_other and other_email and "@" in other_email:
+            cc.append(other_email)
+        return cc
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SUB-TAB A · CUSTOMER LEVEL (consolidated — one email per customer)
+    # ═══════════════════════════════════════════════════════════════════════════
+    with et1:
+        st.markdown(f"Using template: **{selected_template}** · One consolidated email per customer with all outstanding invoices.")
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            c_csm = st.multiselect("CSM",    sorted(fdf["CSM"].dropna().unique())    if "CSM"    in fdf.columns else [], key="c_csm")
+        with c2:
+            c_rag = st.multiselect("RAG",    sorted(fdf["RAG"].dropna().unique())    if "RAG"    in fdf.columns else [], key="c_rag")
+        with c3:
+            c_bkt = st.multiselect("Bucket", [b for b in BUCKET_ORDER if b in fdf.get("Bucket", pd.Series()).values], key="c_bkt")
+
+        cf = fdf.copy()
+        if c_csm: cf = cf[cf["CSM"].isin(c_csm)]
+        if c_rag: cf = cf[cf["RAG"].isin(c_rag)]
+        if c_bkt: cf = cf[cf["Bucket"].isin(c_bkt)]
+        if "email" in cf.columns:
+            cf = cf[cf["email"].notna() & (cf["email"].str.strip() != "")]
+
+        if "customer_name" in cf.columns:
+            agg_dict = {
+                "Email":     ("email",          "first"),
+                "CSM":       ("CSM",            "first"),
+                "RAG":       ("RAG",            "first"),
+                "Invoices":  ("invoice_number", "count"),
+                "Max_Aging": ("Aging",          "max"),
+            }
+            if "CSM Email" in cf.columns:
+                agg_dict["CSM_Email"] = ("CSM Email", "first")
+
+            cust_summary = (cf.groupby("customer_name").agg(**agg_dict)
+                              .reset_index()
+                              .sort_values("Max_Aging", ascending=False))
+
+            # Build per-customer currency-wise outstanding string
+            # e.g. "₹4,838,819  |  $529,867"
+            def fmt_cust_outstanding(cname):
+                rows = cf[cf["customer_name"] == cname]
+                if "balance" not in rows.columns or "currency_code" not in rows.columns:
+                    return "—"
+                parts = (rows.groupby("currency_code")["balance"].sum()
+                             .reset_index()
+                             .sort_values("balance", ascending=False))
+                return "  |  ".join(
+                    f"{CURR_SYM.get(str(r['currency_code']).upper(), '')}{r['balance']:,.0f}"
+                    for _, r in parts.iterrows()
+                )
+
+            cust_summary["Outstanding (FC)"] = cust_summary["customer_name"].apply(fmt_cust_outstanding)
+
+            # Reorder columns
+            col_order = ["customer_name","Email","CSM","RAG","Invoices",
+                         "Outstanding (FC)","Max_Aging"]
+            if "CSM_Email" in cust_summary.columns:
+                col_order.append("CSM_Email")
+            cust_summary = cust_summary[[c for c in col_order if c in cust_summary.columns]]
+            cust_summary.insert(0, "Send?", False)
+
+            edited_cust = st.data_editor(
+                cust_summary, use_container_width=True, height=360,
+                disabled=[c for c in cust_summary.columns if c != "Send?"],
+                column_config={
+                    "Send?":          st.column_config.CheckboxColumn("Send?", default=False),
+                    "Outstanding (FC)": st.column_config.TextColumn("Outstanding (FC)"),
+                    "Max_Aging":      st.column_config.NumberColumn("Max Aging (days)", format="%d"),
+                    "Invoices":       st.column_config.NumberColumn("# Invoices", format="%d"),
+                },
+                key="cust_email_selector",
+            )
+
+            cust_to_send = edited_cust[edited_cust["Send?"] == True]
+            st.caption(f"**{len(cust_to_send)}** customer(s) selected")
+
+            st.divider()
+            c_note = st.text_area("Additional note (optional)", height=70,
+                                   placeholder="e.g. Please share UTR / transaction details upon payment.",
+                                   key="c_note")
+
+            if not cust_to_send.empty:
+                with st.expander("👁 Preview email for first selected customer"):
+                    r0        = cust_to_send.iloc[0]
+                    cname0    = r0["customer_name"]
+                    _, phtml  = build_email(template_key, cname0,
+                                            cf[cf["customer_name"]==cname0],
+                                            r0.get("CSM",""), c_note)
+                    st.components.v1.html(phtml, height=600, scrolling=True)
+
+            st.divider()
+
+            # ── Zoho toggles ───────────────────────────────────────────────────
+            attach_pdfs_cust   = False
+            fetch_plinks_cust  = False
+            if ZOHO_READY:
+                zc1, zc2 = st.columns(2)
+                with zc1:
+                    attach_pdfs_cust = st.checkbox(
+                        "📎 Attach invoice PDFs",
+                        value=False, key="attach_pdfs_cust",
+                        help="Downloads each invoice PDF from Zoho Books and attaches it to the email.",
+                    )
+                with zc2:
+                    fetch_plinks_cust = st.checkbox(
+                        "🔗 Add payment links (Pay Now button)",
+                        value=True, key="fetch_plinks_cust",
+                        help="Fetches the Zoho SecurePay link for each invoice and embeds a Pay Now button in the email.",
+                    )
+            else:
+                st.caption("📎 Configure Zoho Books in the sidebar to enable PDF attachments and payment links.")
+
+            s1, s2 = st.columns([2, 3])
+            with s1:
+                send_cust = st.button(
+                    f"📤 Send to {len(cust_to_send)} Customer(s)",
+                    type="primary",
+                    disabled=(len(cust_to_send)==0 or not smtp_ready or
+                              not any([send_to_customer, send_to_csm, send_to_finance,
+                                       (send_to_other and other_email and "@" in other_email)])),
+                    use_container_width=True, key="send_cust_btn")
+            with s2:
+                recip_summary = []
+                if send_to_customer: recip_summary.append("Customer")
+                if send_to_csm:      recip_summary.append("CSM")
+                if send_to_finance:  recip_summary.append("finance@spyne.ai")
+                if send_to_other and other_email and "@" in other_email:
+                    recip_summary.append(other_email)
+                st.info("Sending to: " + " · ".join(recip_summary) if recip_summary else "No recipients selected")
+
+            if send_cust and not cust_to_send.empty and smtp_ready:
+                # ── Get Zoho access token once if either Zoho feature is on ───
+                zoho_token = None
+                need_zoho  = (attach_pdfs_cust or fetch_plinks_cust) and ZOHO_READY
+                if need_zoho:
+                    with st.spinner("🔑 Authenticating with Zoho Books…"):
+                        try:
+                            zoho_token = get_zoho_token(
+                                ZOHO_CFG["client_id"], ZOHO_CFG["client_secret"],
+                                ZOHO_CFG["refresh_token"], ZOHO_CFG["dc"],
+                            )
+                        except Exception as zt_err:
+                            st.error(f"Zoho authentication failed: {zt_err}. Emails will be sent without PDFs/payment links.")
+
+                # ── Batch-fetch payment links only for SELECTED customers ──────
+                cf_send = cf.copy()
+                if zoho_token and fetch_plinks_cust and "invoice_number" in cf_send.columns:
+                    selected_customers = cust_to_send["customer_name"].tolist()
+                    all_inv_nos = (
+                        cf_send[cf_send["customer_name"].isin(selected_customers)]
+                        ["invoice_number"].dropna().astype(str).unique().tolist()
+                    )
+                    with st.spinner(f"🔗 Fetching payment links for {len(all_inv_nos)} invoice(s) across {len(selected_customers)} customer(s)…"):
+                        try:
+                            pay_links_map, pay_link_errs = fetch_zoho_payment_links(
+                                all_inv_nos, zoho_token,
+                                ZOHO_CFG["org_ids"], ZOHO_CFG["dc"],
+                            )
+                            cf_send["payment_link"] = cf_send["invoice_number"].astype(str).map(pay_links_map)
+                            st.caption(f"🔗 Payment links found: {len(pay_links_map)} / {len(all_inv_nos)}")
+                            if pay_link_errs:
+                                with st.expander(f"⚠️ {len(pay_link_errs)} invoice(s) had issues fetching payment link"):
+                                    for inv, err in pay_link_errs.items():
+                                        st.text(f"{inv}: {err}")
+                        except Exception as pl_err:
+                            st.warning(f"Payment links fetch failed: {pl_err}")
+
+                prog = st.progress(0, text="Sending…")
+                ok, fail, results = 0, 0, []
+                for idx, (_, crow) in enumerate(cust_to_send.iterrows()):
+                    cname     = crow["customer_name"]
+                    to_email  = str(crow.get("Email","")).strip() if send_to_customer else None
+                    csm_email = str(crow.get("CSM_Email", crow.get("CSM",""))).strip()
+                    cc_list   = _build_cc(csm_email)
+                    cust_invs = cf_send[cf_send["customer_name"]==cname]
+                    subject, html = build_email(template_key, cname, cust_invs,
+                                                crow.get("CSM",""), c_note)
+
+                    # ── Fetch PDFs for all invoices of this customer ───────────
+                    attachments = []
+                    pdf_notes   = []
+                    if zoho_token and attach_pdfs_cust and "invoice_number" in cust_invs.columns:
+                        for inv_no in cust_invs["invoice_number"].dropna().unique():
+                            inv_no = str(inv_no).strip()
+                            try:
+                                pdf_bytes, _, _org_used, _plink = fetch_zoho_invoice_pdf(
+                                    inv_no, zoho_token,
+                                    ZOHO_CFG["org_ids"], ZOHO_CFG["dc"],
+                                )
+                                if pdf_bytes:
+                                    attachments.append((f"{inv_no}.pdf", pdf_bytes))
+                                    pdf_notes.append(f"✅ {inv_no}")
+                                else:
+                                    pdf_notes.append(f"⚠️ {inv_no} (not in Zoho)")
+                            except Exception as pdf_err:
+                                pdf_notes.append(f"❌ {inv_no} ({pdf_err})")
+
+                    # Determine actual TO
+                    if to_email and "@" in to_email:
+                        actual_to, actual_cc = to_email, cc_list
+                    elif cc_list:
+                        actual_to, actual_cc = cc_list[0], cc_list[1:]
+                    else:
+                        results.append({"Customer": cname, "Status": "⚠️ No recipients",
+                                        "PDFs": ""})
+                        continue
+                    try:
+                        send_reminder(SMTP_CFG, actual_to, actual_cc, subject, html,
+                                      attachments=attachments or None)
+                        log_email("(consolidated)", cname, actual_to,
+                                  ", ".join(actual_cc), subject, "sent")
+                        ok += 1
+                        status = f"✅ Sent" + (f" ({len(attachments)} PDF(s))" if attachments else "")
+                        results.append({"Customer": cname, "To": actual_to,
+                                        "CC": ", ".join(actual_cc),
+                                        "Status": status,
+                                        "PDFs": " | ".join(pdf_notes) if pdf_notes else "—"})
+                    except Exception as e:
+                        log_email("(consolidated)", cname, actual_to,
+                                  ", ".join(actual_cc), subject, "failed", str(e))
+                        fail += 1
+                        results.append({"Customer": cname, "To": actual_to,
+                                        "Status": f"❌ {e}",
+                                        "PDFs": " | ".join(pdf_notes) if pdf_notes else "—"})
+                    prog.progress((idx+1)/len(cust_to_send), text=f"Sent {idx+1} of {len(cust_to_send)}…")
+                prog.empty()
+                if ok:   st.success(f"✅ {ok} reminder(s) sent.")
+                if fail: st.error(f"❌ {fail} failed.")
+                st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
+        else:
+            st.info("customer_name column not detected.")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SUB-TAB B · INVOICE LEVEL (one email per invoice)
+    # ═══════════════════════════════════════════════════════════════════════════
+    with et2:
+        st.markdown(f"Using template: **{selected_template}** · One email per invoice.")
+
+        i1, i2, i3 = st.columns(3)
+        with i1:
+            e_csm = st.multiselect("CSM",    sorted(fdf["CSM"].dropna().unique())    if "CSM"    in fdf.columns else [], key="e_csm")
+        with i2:
+            e_rag = st.multiselect("RAG",    sorted(fdf["RAG"].dropna().unique())    if "RAG"    in fdf.columns else [], key="e_rag")
+        with i3:
+            e_bkt = st.multiselect("Bucket", [b for b in BUCKET_ORDER if b in fdf.get("Bucket", pd.Series()).values], key="e_bkt")
+
+        ef = fdf.copy()
+        if e_csm: ef = ef[ef["CSM"].isin(e_csm)]
+        if e_rag: ef = ef[ef["RAG"].isin(e_rag)]
+        if e_bkt: ef = ef[ef["Bucket"].isin(e_bkt)]
+        if "email" in ef.columns:
+            ef = ef[ef["email"].notna() & (ef["email"].str.strip() != "")]
+
+        st.caption(f"{len(ef):,} invoices with valid email addresses")
+
+        sel_cols = [c for c in ["invoice_number","customer_name","email","CSM",
+                                 "CSM Email","Final USD","Aging","Bucket","RAG"] if c in ef.columns]
+        sel_df = ef[sel_cols].sort_values("Aging", ascending=False).copy()
+        sel_df.insert(0, "Send?", False)
+
+        edited_sel = st.data_editor(
+            sel_df, use_container_width=True, height=340,
+            disabled=[c for c in sel_df.columns if c != "Send?"],
+            column_config={
+                "Send?":     st.column_config.CheckboxColumn("Send?", default=False),
+                "Final USD": st.column_config.NumberColumn("Final USD", format="$%.0f"),
+                "Aging":     st.column_config.NumberColumn("Aging (days)", format="%d"),
+            },
+            key="email_selector",
+        )
+
+        to_send = edited_sel[edited_sel["Send?"] == True]
+        st.caption(f"**{len(to_send)}** invoice(s) selected")
+
+        st.divider()
+        custom_note = st.text_area("Additional note (optional)", height=70,
+                                    placeholder="e.g. Please note our bank details have changed.",
+                                    key="inv_note")
+
+        if not to_send.empty:
+            with st.expander("👁 Preview first email"):
+                r0       = to_send.iloc[0]
+                cname0   = str(r0.get("customer_name",""))
+                _, phtml = build_email(template_key, cname0,
+                                       pd.DataFrame([r0.to_dict()]),
+                                       str(r0.get("CSM","")), custom_note)
+                st.components.v1.html(phtml, height=560, scrolling=True)
+
+        st.divider()
+
+        # ── Zoho toggles ───────────────────────────────────────────────────────
+        attach_pdfs_inv  = False
+        fetch_plinks_inv = False
+        if ZOHO_READY:
+            zi1, zi2 = st.columns(2)
+            with zi1:
+                attach_pdfs_inv = st.checkbox(
+                    "📎 Attach invoice PDF",
+                    value=False, key="attach_pdfs_inv",
+                    help="Downloads the invoice PDF from Zoho Books and attaches it.",
+                )
+            with zi2:
+                fetch_plinks_inv = st.checkbox(
+                    "🔗 Add payment links (Pay Now button)",
+                    value=True, key="fetch_plinks_inv",
+                    help="Fetches the Zoho SecurePay link and embeds a Pay Now button in the email.",
+                )
+        else:
+            st.caption("📎 Configure Zoho Books in the sidebar to enable PDF attachments and payment links.")
+
+        b1, b2 = st.columns([2, 3])
+        with b1:
+            send_clicked = st.button(
+                f"📤 Send {len(to_send)} Reminder(s)",
+                type="primary",
+                disabled=(len(to_send)==0 or not smtp_ready or
+                          not any([send_to_customer, send_to_csm, send_to_finance,
+                                   (send_to_other and other_email and "@" in other_email)])),
+                use_container_width=True, key="send_inv_btn")
+        with b2:
+            recip_inv = []
+            if send_to_customer: recip_inv.append("Customer")
+            if send_to_csm:      recip_inv.append("CSM")
+            if send_to_finance:  recip_inv.append("finance@spyne.ai")
+            if send_to_other and other_email and "@" in other_email:
+                recip_inv.append(other_email)
+            st.info("Sending to: " + " · ".join(recip_inv) if recip_inv else "No recipients selected")
+
+        if send_clicked and not to_send.empty and smtp_ready:
+            # ── Get Zoho access token once if either Zoho feature is on ──────
+            zoho_token_inv = None
+            need_zoho_inv  = (attach_pdfs_inv or fetch_plinks_inv) and ZOHO_READY
+            if need_zoho_inv:
+                with st.spinner("🔑 Authenticating with Zoho Books…"):
+                    try:
+                        zoho_token_inv = get_zoho_token(
+                            ZOHO_CFG["client_id"], ZOHO_CFG["client_secret"],
+                            ZOHO_CFG["refresh_token"], ZOHO_CFG["dc"],
+                        )
+                    except Exception as zt_err:
+                        st.error(f"Zoho authentication failed: {zt_err}. Emails will be sent without PDFs/payment links.")
+
+            # ── Batch-fetch ALL payment links upfront (one pass) ──────────────
+            ef_send = ef.copy()
+            if zoho_token_inv and fetch_plinks_inv and "invoice_number" in ef_send.columns:
+                sel_inv_nos = to_send["invoice_number"].dropna().astype(str).unique().tolist()
+                with st.spinner(f"🔗 Fetching payment links for {len(sel_inv_nos)} invoice(s)…"):
+                    try:
+                        pay_links_map_inv, pay_link_errs_inv = fetch_zoho_payment_links(
+                            sel_inv_nos, zoho_token_inv,
+                            ZOHO_CFG["org_ids"], ZOHO_CFG["dc"],
+                        )
+                        ef_send["payment_link"] = ef_send["invoice_number"].astype(str).map(pay_links_map_inv)
+                        st.caption(f"🔗 Payment links found: {len(pay_links_map_inv)} / {len(sel_inv_nos)}")
+                        if pay_link_errs_inv:
+                            with st.expander(f"⚠️ {len(pay_link_errs_inv)} invoice(s) had issues fetching payment link"):
+                                for inv, err in pay_link_errs_inv.items():
+                                    st.text(f"{inv}: {err}")
+                    except Exception as pl_err:
+                        st.warning(f"Payment links fetch failed: {pl_err}")
+
+            progress = st.progress(0, text="Sending…")
+            ok2, fail2, results2 = 0, 0, []
+            for idx, (_, row) in enumerate(to_send.iterrows()):
+                # Use the enriched row (with payment_link if fetched)
+                inv_no   = str(row.get("invoice_number","")).strip()
+                enriched_row = ef_send[ef_send["invoice_number"].astype(str) == inv_no]
+                row_data  = enriched_row.iloc[0].to_dict() if not enriched_row.empty else row.to_dict()
+
+                to_email  = str(row.get("email","")).strip() if send_to_customer else None
+                csm_email = str(row.get("CSM Email","")).strip()
+                cc_list   = _build_cc(csm_email)
+                customer  = str(row.get("customer_name",""))
+                subject, html = build_email(template_key, customer,
+                                            pd.DataFrame([row_data]),
+                                            str(row.get("CSM","")), custom_note)
+
+                # ── Fetch PDF for this invoice ─────────────────────────────────
+                attachments_inv = []
+                pdf_note_inv    = "—"
+                if zoho_token_inv and attach_pdfs_inv and inv_no:
+                    try:
+                        pdf_bytes, _, _org_used, _plink = fetch_zoho_invoice_pdf(
+                            inv_no, zoho_token_inv,
+                            ZOHO_CFG["org_ids"], ZOHO_CFG["dc"],
+                        )
+                        if pdf_bytes:
+                            attachments_inv = [(f"{inv_no}.pdf", pdf_bytes)]
+                            pdf_note_inv    = "✅ Attached"
+                        else:
+                            pdf_note_inv = "⚠️ Not found in Zoho"
+                    except Exception as pdf_err:
+                        pdf_note_inv = f"❌ {pdf_err}"
+
+                if to_email and "@" in to_email:
+                    actual_to, actual_cc = to_email, cc_list
+                elif cc_list:
+                    actual_to, actual_cc = cc_list[0], cc_list[1:]
+                else:
+                    results2.append({"Invoice": inv_no, "Status": "⚠️ No recipients", "PDF": pdf_note_inv})
+                    continue
+                try:
+                    send_reminder(SMTP_CFG, actual_to, actual_cc, subject, html,
+                                  attachments=attachments_inv or None)
+                    log_email(inv_no, customer, actual_to, ", ".join(actual_cc), subject, "sent")
+                    ok2 += 1
+                    status2 = "✅ Sent" + (" (PDF attached)" if attachments_inv else "")
+                    results2.append({"Invoice": inv_no, "To": actual_to,
+                                     "Status": status2, "PDF": pdf_note_inv})
+                except Exception as e:
+                    log_email(inv_no, customer, actual_to, ", ".join(actual_cc), subject, "failed", str(e))
+                    fail2 += 1
+                    results2.append({"Invoice": inv_no, "To": actual_to,
+                                     "Status": f"❌ {e}", "PDF": pdf_note_inv})
+                progress.progress((idx+1)/len(to_send), text=f"Sent {idx+1} of {len(to_send)}…")
+            progress.empty()
+            if ok2:   st.success(f"✅ {ok2} sent.")
+            if fail2: st.error(f"❌ {fail2} failed.")
+            st.dataframe(pd.DataFrame(results2), use_container_width=True, hide_index=True)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SUB-TAB C · SENT LOG
+    # ═══════════════════════════════════════════════════════════════════════════
+    with et3:
+        st.subheader("📋 Sent Email Log")
+        log_df = get_sent_log()
+        if not log_df.empty:
+            log_df["sent_at"] = log_df["sent_at"].str[:19]
+            display_log = log_df[["sent_at","invoice_no","customer","to_email",
+                                   "cc_emails","subject","status","error"]].copy()
+            display_log.columns = ["Sent At","Invoice","Customer","To","CC","Subject","Status","Error"]
+            st.dataframe(display_log, use_container_width=True, height=400, hide_index=True)
+            st.download_button("⬇ Download Log", data=export_excel(display_log),
+                               file_name="sent_email_log.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        else:
+            st.info("No emails sent yet.")
