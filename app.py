@@ -1161,93 +1161,40 @@ load_credentials()   # populate session_state from credentials.json (first run o
 
 st.title("📊 AR Collections Dashboard")
 
-# ── Data source selector ──────────────────────────────────────────────────────
-src = st.radio("Data source", ["📁 Upload Excel / CSV", "🔗 Google Sheets URL"],
-               horizontal=True, label_visibility="collapsed")
+# ── Fixed Google Sheet ────────────────────────────────────────────────────────
+_FIXED_SHEET_URL = "https://docs.google.com/spreadsheets/d/1pY_hPKVa8A-d6kbCnsuRdns4CiuRTh1QaIJRf5-ppOI/edit?gid=0#gid=0"
 
 file_bytes = None
 
-if src == "📁 Upload Excel / CSV":
-    uploaded = st.file_uploader("Upload Excel file", type=["xlsx", "xls"],
-                                label_visibility="collapsed")
-    if uploaded:
-        file_bytes = uploaded.read()
+# ── Header row: title + refresh button ───────────────────────────────────────
+_hcol1, _hcol2 = st.columns([6, 1])
+with _hcol2:
+    if st.button("🔄 Refresh Data", use_container_width=True, type="primary"):
+        fetch_gsheet.clear()          # bust the cache so next call re-fetches
+        st.session_state.pop("_gs_file_bytes", None)
+        st.session_state["_gs_last_refresh"] = None
+        st.rerun()
 
-else:  # Google Sheets
-    gs_url = st.text_input(
-        "Google Sheets URL",
-        placeholder="https://docs.google.com/spreadsheets/d/…/edit",
-        help="The sheet must be shared as 'Anyone with the link can view' for public access.",
-    )
+# ── Load from sheet (cached; only re-fetched after Refresh button) ────────────
+if "_gs_file_bytes" not in st.session_state or st.session_state["_gs_file_bytes"] is None:
+    with st.spinner("Loading data from Google Sheets…"):
+        try:
+            file_bytes = fetch_gsheet(_FIXED_SHEET_URL)
+            st.session_state["_gs_file_bytes"]   = file_bytes
+            st.session_state["_gs_last_refresh"] = time.time()
+        except PermissionError as e:
+            st.error(str(e))
+            st.stop()
+        except Exception as e:
+            st.error(f"Error loading sheet: {e}")
+            st.stop()
+else:
+    file_bytes = st.session_state["_gs_file_bytes"]
 
-    use_private = st.checkbox("Private sheet — use Service Account credentials")
-    creds_file  = None
-    if use_private:
-        st.markdown(
-            "Upload your **service account JSON** key file. "
-            "[How to create one](https://docs.gspread.org/en/latest/oauth2.html#for-bots-using-service-account)"
-        )
-        creds_file = st.file_uploader("Service account JSON", type=["json"],
-                                      label_visibility="collapsed")
-
-    if gs_url:
-        # ── Auto-refresh every 2 minutes ──────────────────────────────────────
-        if _AUTOREFRESH_AVAILABLE:
-            _refresh_count = _st_autorefresh(interval=120_000, key="gs_autorefresh")
-        else:
-            _refresh_count = 0
-
-        with st.spinner("Fetching from Google Sheets…"):
-            try:
-                if use_private and creds_file:
-                    _creds_json = creds_file.read().decode()
-                    file_bytes = fetch_gsheet_private(gs_url, _creds_json)
-                elif use_private:
-                    st.warning("Upload your service account JSON key to access a private sheet.")
-                else:
-                    file_bytes = fetch_gsheet(gs_url)
-
-                if file_bytes:
-                    # Track last successful refresh time
-                    st.session_state["_gs_last_refresh"] = time.time()
-
-            except PermissionError as e:
-                st.error(str(e))
-            except Exception as e:
-                st.error(f"Error: {e}")
-
-        # ── Status bar ────────────────────────────────────────────────────────
-        _last = st.session_state.get("_gs_last_refresh")
-        if _last:
-            _ago = int(time.time() - _last)
-            _next_in = max(0, 120 - _ago)
-            if _AUTOREFRESH_AVAILABLE:
-                st.caption(
-                    f"🔄 Auto-refresh every **2 min** · "
-                    f"Last refreshed: **{datetime.fromtimestamp(_last).strftime('%H:%M:%S')}** · "
-                    f"Next refresh in **{_next_in}s**"
-                )
-            else:
-                st.caption(
-                    f"⚠️ Install `streamlit-autorefresh` for auto-refresh · "
-                    f"Last loaded: {datetime.fromtimestamp(_last).strftime('%H:%M:%S')}"
-                )
-        elif file_bytes:
-            st.success("Sheet loaded successfully.")
-
-if not file_bytes:
-    st.markdown("""
-    ### Getting started
-    **Option 1 — Upload a file:** drag your Excel (.xlsx) file onto the uploader above.
-
-    **Option 2 — Google Sheets:** paste a Sheets URL. The sheet must be set to
-    *"Anyone with the link → Viewer"*. For private sheets, upload a service account JSON key.
-
-    The file should contain columns like:
-    `invoice_number` · `customer_name` · `CSM` · `Final USD` · `date`
-    · `Service_period_Start_date` · `due_date` · `Status` · `country` · `Product`
-    """)
-    st.stop()
+# ── Last-refreshed caption ────────────────────────────────────────────────────
+_last = st.session_state.get("_gs_last_refresh")
+if _last:
+    st.caption(f"📄 Data as of **{datetime.fromtimestamp(_last).strftime('%d %b %Y, %H:%M:%S')}** · Click **Refresh Data** to fetch latest.")
 
 df = load_data(file_bytes)
 
