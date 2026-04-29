@@ -1023,6 +1023,31 @@ def export_excel(df):
     return buf.getvalue()
 
 
+def _fmt_fig(fig):
+    """Apply rounded integer formatting to all hover labels and axis ticks."""
+    fig.update_traces(
+        hovertemplate=None,   # reset per-trace template first
+    )
+    # Apply a clean rounded hover across all traces
+    for trace in fig.data:
+        if hasattr(trace, "hovertemplate"):
+            if trace.type == "pie":
+                trace.hovertemplate = "<b>%{label}</b><br>%{value:,.0f}<br>%{percent}<extra></extra>"
+            else:
+                trace.hovertemplate = (
+                    "<b>%{fullData.name}</b><br>"
+                    "%{x}: <b>%{y:,.0f}</b><extra></extra>"
+                    if trace.orientation != "h"
+                    else "<b>%{fullData.name}</b><br>"
+                         "%{y}: <b>%{x:,.0f}</b><extra></extra>"
+                )
+    fig.update_layout(
+        yaxis=dict(tickformat=",.0f"),
+        xaxis=dict(tickformat=",.0f"),
+    )
+    return fig
+
+
 # ── Column-level filter widget (reusable) ────────────────────────────────────
 def column_filters(df: pd.DataFrame, key_prefix: str = "cf") -> pd.DataFrame:
     """
@@ -1418,7 +1443,7 @@ with tab_overview:
                 hole=0.4,
             )
             fig.update_traces(textinfo="percent+label")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(_fmt_fig(fig), use_container_width=True)
 
     with c2:
         if "Bucket" in fdf.columns and "RAG" in fdf.columns:
@@ -1435,10 +1460,10 @@ with tab_overview:
                 title="Outstanding by Aging Bucket & RAG",
                 color_discrete_map=RAG_COLORS,
                 category_orders={"Bucket": BUCKET_ORDER, "RAG": ["Green", "Amber", "Red"]},
-                text_auto=".2s",
+                text_auto=",.0f",
             )
             fig.update_layout(xaxis_title="", yaxis_title="USD", legend_title="RAG")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(_fmt_fig(fig), use_container_width=True)
 
     st.divider()
 
@@ -1479,9 +1504,9 @@ with tab_overview:
                              .head(10))
             fig = px.bar(country_data, x="Final USD", y="country",
                          orientation="h", title="Top 10 Countries by Outstanding",
-                         text_auto=".2s")
+                         text_auto=",.0f")
             fig.update_layout(yaxis=dict(autorange="reversed"), yaxis_title="")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(_fmt_fig(fig), use_container_width=True)
 
     with c4:
         if "Product" in fdf.columns:
@@ -1491,9 +1516,9 @@ with tab_overview:
                               .head(10))
             fig = px.bar(product_data, x="Final USD", y="Product",
                          orientation="h", title="Top 10 Products by Outstanding",
-                         text_auto=".2s")
+                         text_auto=",.0f")
             fig.update_layout(yaxis=dict(autorange="reversed"), yaxis_title="")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(_fmt_fig(fig), use_container_width=True)
 
     # ── Currency-wise outstanding (FC) with RAG ───────────────────────────────
     if "currency_code" in fdf.columns and "balance" in fdf.columns and "RAG" in fdf.columns:
@@ -1515,13 +1540,13 @@ with tab_overview:
                 title="FC Outstanding by Currency & RAG",
                 color_discrete_map=RAG_COLORS,
                 category_orders={"RAG": ["Green", "Amber", "Red"]},
-                text_auto=".2s",
+                text_auto=",.0f",
             )
             fig.update_layout(
                 xaxis_title="Currency", yaxis_title="FC Amount",
                 legend_title="RAG", xaxis_tickangle=-30,
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(_fmt_fig(fig), use_container_width=True)
 
         with cc2:
             # Pivot: currency rows × RAG columns
@@ -1662,10 +1687,10 @@ with tab_csm:
         csm_df.head(top_n), x="CSM", y="Total Outstanding",
         title=f"Top {top_n} CSMs by Outstanding",
         color="Total Outstanding", color_continuous_scale="Reds",
-        text_auto=".2s",
+        text_auto=",.0f",
     )
     fig.update_layout(xaxis_tickangle=-30, coloraxis_showscale=False)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(_fmt_fig(fig), use_container_width=True)
 
     # ── Stacked RAG bar ───────────────────────────────────────────────────────
     if rag_out_cols:
@@ -1676,10 +1701,10 @@ with tab_csm:
         melted["RAG"] = melted["RAG"].apply(lambda x: x.split()[0])  # strip suffix
         fig2 = px.bar(melted, x="CSM", y="Amount", color="RAG",
                       color_discrete_map=RAG_COLORS,
-                      title="Outstanding by RAG per CSM", text_auto=".2s",
+                      title="Outstanding by RAG per CSM", text_auto=",.0f",
                       labels={"Amount": "Outstanding (₹)" if val_col == "Outstanding" else "Outstanding (USD)"})
         fig2.update_layout(xaxis_tickangle=-30)
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(_fmt_fig(fig2), use_container_width=True)
 
     st.divider()
     st.subheader("CSM Deep Dive")
@@ -1826,10 +1851,10 @@ with tab_customer:
         cust_df.head(top_n_c), x="Customer", y="Total Outstanding",
         title=f"Top {top_n_c} Customers by Outstanding",
         color="Total Outstanding", color_continuous_scale="Reds",
-        text_auto=".2s",
+        text_auto=",.0f",
     )
     fig_c.update_layout(xaxis_tickangle=-30, coloraxis_showscale=False)
-    st.plotly_chart(fig_c, use_container_width=True)
+    st.plotly_chart(_fmt_fig(fig_c), use_container_width=True)
 
     # ── Stacked RAG bar ───────────────────────────────────────────────────────
     if rag_out_cols_c:
@@ -1841,11 +1866,11 @@ with tab_customer:
         fig_c2 = px.bar(
             melted_c, x="Customer", y="Amount", color="RAG",
             color_discrete_map=RAG_COLORS,
-            title="Outstanding by RAG per Customer", text_auto=".2s",
+            title="Outstanding by RAG per Customer", text_auto=",.0f",
             labels={"Amount": val_lbl_c},
         )
         fig_c2.update_layout(xaxis_tickangle=-30)
-        st.plotly_chart(fig_c2, use_container_width=True)
+        st.plotly_chart(_fmt_fig(fig_c2), use_container_width=True)
 
     st.divider()
 
