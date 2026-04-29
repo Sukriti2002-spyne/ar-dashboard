@@ -145,11 +145,14 @@ def _load_users() -> dict:
                 users[uname.lower()] = pw if len(pw) == 64 else _hash_pw(pw)
         except Exception:
             pass
-    # 3. Hard-coded fallback (initial setup / local dev without config)
+    # 3. Hard-coded fallback — covers all authorised users
     if not users:
+        _default_pw = _hash_pw("spyne@2024")
         users = {
-            "admin":   _hash_pw("spyne@2024"),
-            "finance": _hash_pw("spyne@2024"),
+            "admin":   _default_pw,
+            "sukriti": _default_pw,
+            "yash":    _default_pw,
+            "finance": _default_pw,
         }
     return users
 
