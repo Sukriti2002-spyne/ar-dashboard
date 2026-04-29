@@ -1323,6 +1323,17 @@ with st.sidebar:
     product_options = sorted(col("Product").dropna().unique())
     product_sel = st.multiselect("Product", product_options)
 
+    inv_status_options = (
+        sorted(df["Current Invoice Status"].dropna().unique())
+        if "Current Invoice Status" in df.columns else []
+    )
+    inv_status_sel = st.multiselect(
+        "Invoice Status",
+        inv_status_options,
+        default=inv_status_options,   # all selected by default
+        key="sidebar_inv_status",
+    )
+
     st.divider()
     cust_count = df["customer_name"].nunique() if "customer_name" in df.columns else "?"
     st.caption(f"Dataset: **{len(df):,}** invoices · **{cust_count}** customers")
@@ -1645,11 +1656,13 @@ Go back to API Console, generate a fresh code, and paste it here right away.
 
 # Apply global filters
 fdf = df.copy()
-if csm_sel:       fdf = fdf[fdf["CSM"].isin(csm_sel)]           if "CSM"          in fdf.columns else fdf
-if rag_sel:       fdf = fdf[fdf["RAG"].isin(rag_sel)]           if "RAG"          in fdf.columns else fdf
-if bucket_sel:    fdf = fdf[fdf["Bucket"].isin(bucket_sel)]     if "Bucket"       in fdf.columns else fdf
-if country_sel:   fdf = fdf[fdf["country"].isin(country_sel)]   if "country"      in fdf.columns else fdf
-if product_sel:   fdf = fdf[fdf["Product"].isin(product_sel)]
+if csm_sel:          fdf = fdf[fdf["CSM"].isin(csm_sel)]                             if "CSM"                    in fdf.columns else fdf
+if rag_sel:          fdf = fdf[fdf["RAG"].isin(rag_sel)]                             if "RAG"                    in fdf.columns else fdf
+if bucket_sel:       fdf = fdf[fdf["Bucket"].isin(bucket_sel)]                       if "Bucket"                 in fdf.columns else fdf
+if country_sel:      fdf = fdf[fdf["country"].isin(country_sel)]                     if "country"                in fdf.columns else fdf
+if product_sel:      fdf = fdf[fdf["Product"].isin(product_sel)]                     if "Product"                in fdf.columns else fdf
+if inv_status_sel and "Current Invoice Status" in fdf.columns:
+    fdf = fdf[fdf["Current Invoice Status"].isin(inv_status_sel)]
 
 # ── TABS ──────────────────────────────────────────────────────────────────────
 tab_overview, tab_csm, tab_customer, tab_invoices, tab_reasons, tab_email = st.tabs([
