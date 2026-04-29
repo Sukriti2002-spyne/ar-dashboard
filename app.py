@@ -1279,14 +1279,7 @@ df = load_data(file_bytes)
 if "balance" in df.columns:
     df = df[df["balance"].fillna(0) > 0].copy()
 
-# ── Keep only Overdue / Sent invoices (based on Current Invoice Status) ────────
-if "Current Invoice Status" in df.columns:
-    _status_norm = df["Current Invoice Status"].astype(str).str.strip().str.lower()
-    df = df[_status_norm.isin(["overdue", "sent"])].copy()
-elif "Status" in df.columns:
-    # fallback: try the Status column
-    _status_norm = df["Status"].astype(str).str.strip().str.lower()
-    df = df[_status_norm.isin(["overdue", "sent"])].copy()
+# Note: Invoice Status filtering is handled by the sidebar multiselect (default: overdue + sent)
 
 # ─── Column presence helpers ──────────────────────────────────────────────────
 def col(name):
@@ -1326,16 +1319,18 @@ with st.sidebar:
     product_options = sorted(col("Product").dropna().unique())
     product_sel = st.multiselect("Product", product_options)
 
-    inv_status_options = (
-        sorted(df["Current Invoice Status"].dropna().unique())
-        if "Current Invoice Status" in df.columns else []
-    )
-    inv_status_sel = st.multiselect(
-        "Invoice Status",
-        inv_status_options,
-        default=inv_status_options,   # all selected by default
-        key="sidebar_inv_status",
-    )
+    if "Current Invoice Status" in df.columns:
+        _all_statuses   = sorted(df["Current Invoice Status"].astype(str).str.strip().dropna().unique())
+        _default_statuses = [s for s in _all_statuses if s.lower() in ("overdue", "sent")]
+        inv_status_sel  = st.multiselect(
+            "Invoice Status",
+            options=_all_statuses,
+            default=_default_statuses,
+            key="sidebar_inv_status",
+            help="Default shows Overdue & Sent. Add other statuses to include them.",
+        )
+    else:
+        inv_status_sel = []
 
     st.divider()
     cust_count = df["customer_name"].nunique() if "customer_name" in df.columns else "?"
