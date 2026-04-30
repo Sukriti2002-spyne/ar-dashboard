@@ -270,17 +270,23 @@ ZOHO_DC_MAP = {
 
 # ── Shared invoice table builder ───────────────────────────────────────────────
 def _invoice_table_html(invoices_df: pd.DataFrame) -> str:
+
+    def _clean(val, fallback="—"):
+        """Return a display-safe string; replace blank/NaN/NaT with fallback."""
+        s = str(val) if val is not None else ""
+        s = s.strip()
+        return fallback if s in ("", "nan", "NaT", "None", "NaN") else s
+
     rows = ""
     for i, (_, r) in enumerate(invoices_df.iterrows()):
         bg       = "#f8fafc" if i % 2 == 0 else "#ffffff"
-        sym      = CURR_SYM.get(str(r.get("currency_code","")).upper(), "")
-        amount   = r.get("total", r.get("Final USD", 0))
-        balance  = r.get("balance", amount)   # outstanding balance in FC
-        inv_date = str(r.get("date",""))[:10]
-        svc_s    = str(r.get("Service_period_Start_date",""))[:10]
-        svc_e    = str(r.get("Service_period_End_date",""))[:10]
+        currency = _clean(r.get("currency_code", ""), "INR")   # default INR if blank
+        amount   = r.get("total", r.get("Final USD", 0)) or 0
+        balance  = r.get("balance", amount) or 0
+        inv_date = _clean(str(r.get("date", ""))[:10])
+        svc_s    = _clean(str(r.get("Service_period_Start_date", ""))[:10])
+        svc_e    = _clean(str(r.get("Service_period_End_date",   ""))[:10])
 
-        # Highlight outstanding balance in red if it differs from invoice amount
         bal_style = "color:#000000;font-weight:700;"
 
         # Pay Now button — only rendered when a valid payment link exists
@@ -297,27 +303,31 @@ def _invoice_table_html(invoices_df: pd.DataFrame) -> str:
 
         rows += f"""
         <tr style="background:{bg};">
-          <td style="padding:9px 12px;font-size:13px;color:#000000;border-bottom:1px solid #e2e8f0;">{r.get("invoice_number","")}</td>
+          <td style="padding:9px 12px;font-size:13px;color:#000000;border-bottom:1px solid #e2e8f0;">{_clean(r.get("invoice_number",""))}</td>
           <td style="padding:9px 12px;font-size:13px;color:#000000;border-bottom:1px solid #e2e8f0;">{inv_date}</td>
-          <td style="padding:9px 12px;font-size:13px;color:#000000;border-bottom:1px solid #e2e8f0;">{r.get("currency_code","")}</td>
-          <td style="padding:9px 12px;font-size:13px;color:#000000;border-bottom:1px solid #e2e8f0;font-weight:600;">{fmt_amount(amount, r.get("currency_code",""))}</td>
-          <td style="padding:9px 12px;font-size:13px;border-bottom:1px solid #e2e8f0;{bal_style}">{fmt_amount(balance, r.get("currency_code",""))}</td>
+          <td style="padding:9px 12px;font-size:13px;color:#000000;border-bottom:1px solid #e2e8f0;">{currency}</td>
+          <td style="padding:9px 12px;font-size:13px;color:#000000;border-bottom:1px solid #e2e8f0;font-weight:600;">{fmt_amount(amount, currency)}</td>
+          <td style="padding:9px 12px;font-size:13px;border-bottom:1px solid #e2e8f0;{bal_style}">{fmt_amount(balance, currency)}</td>
           <td style="padding:9px 12px;font-size:13px;color:#000000;border-bottom:1px solid #e2e8f0;">{svc_s}</td>
           <td style="padding:9px 12px;font-size:13px;color:#000000;border-bottom:1px solid #e2e8f0;">{svc_e}</td>
           <td style="padding:9px 12px;border-bottom:1px solid #e2e8f0;text-align:center;">{pay_cell}</td>
         </tr>"""
 
-    # Total row: sum outstanding balances per currency
-    total_rows = ""
-    if "balance" in invoices_df.columns and "currency_code" in invoices_df.columns:
-        by_curr = (invoices_df.groupby("currency_code")["balance"]
-                              .sum()
-                              .reset_index()
-                              .sort_values("balance", ascending=False))
-        total_str = "  |  ".join(
-            fmt_amount(r["balance"], r["currency_code"])
-            for _, r in by_curr.iterrows()
+    # Total row — group by currency; if currency_code missing/blank default to INR
+    if "balance" in invoices_df.columns:
+        tmp = invoices_df.copy()
+        tmp["_curr"] = (tmp.get("currency_code") if "currency_code" in tmp.columns
+                        else "INR")
+        tmp["_curr"] = tmp["_curr"].astype(str).str.strip().replace(
+            {"": "INR", "nan": "INR", "NaN": "INR", "None": "INR"}
         )
+        by_curr = (tmp.groupby("_curr")["balance"].sum()
+                   .reset_index()
+                   .sort_values("balance", ascending=False))
+        total_str = "  |  ".join(
+            fmt_amount(row["balance"], row["_curr"])
+            for _, row in by_curr.iterrows()
+        ) or "—"
     else:
         total_usd = invoices_df["Final USD"].sum() if "Final USD" in invoices_df.columns else 0
         total_str = fmt_amount(total_usd, "USD")
