@@ -2148,18 +2148,24 @@ with tab_email:
     with et1:
         st.markdown(f"Using template: **{selected_template}** · One consolidated email per customer with all outstanding invoices.")
 
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         with c1:
             c_csm = st.multiselect("CSM",    sorted(fdf["CSM"].dropna().unique())    if "CSM"    in fdf.columns else [], key="c_csm")
         with c2:
             c_rag = st.multiselect("RAG",    sorted(fdf["RAG"].dropna().unique())    if "RAG"    in fdf.columns else [], key="c_rag")
         with c3:
             c_bkt = st.multiselect("Bucket", [b for b in BUCKET_ORDER if b in fdf.get("Bucket", pd.Series()).values], key="c_bkt")
+        with c4:
+            _cis_opts = (sorted(fdf["Current Invoice Status"].astype(str).str.strip().dropna().unique())
+                         if "Current Invoice Status" in fdf.columns else [])
+            c_inv_status = st.multiselect("Invoice Status", _cis_opts, key="c_inv_status")
 
         cf = fdf.copy()
-        if c_csm: cf = cf[cf["CSM"].isin(c_csm)]
-        if c_rag: cf = cf[cf["RAG"].isin(c_rag)]
-        if c_bkt: cf = cf[cf["Bucket"].isin(c_bkt)]
+        if c_csm:       cf = cf[cf["CSM"].isin(c_csm)]
+        if c_rag:       cf = cf[cf["RAG"].isin(c_rag)]
+        if c_bkt:       cf = cf[cf["Bucket"].isin(c_bkt)]
+        if c_inv_status and "Current Invoice Status" in cf.columns:
+            cf = cf[cf["Current Invoice Status"].isin(c_inv_status)]
         if "email" in cf.columns:
             cf = cf[cf["email"].notna() & (cf["email"].str.strip() != "")]
 
