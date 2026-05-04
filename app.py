@@ -2557,21 +2557,19 @@ with tab_email:
             cf = cf[cf["email"].notna() & (cf["email"].str.strip() != "")]
 
         if "customer_name" in cf.columns:
-            agg_dict = {
-                "Email":     ("email",          "first"),
-                "CSM":       ("CSM",            "first"),
-                "RAG":       ("RAG",            "first"),
-                "Invoices":  ("invoice_number", "count"),
-                "Max_Aging": ("Aging",          "max"),
-            }
-            if "CSM Email" in cf.columns:
-                agg_dict["CSM_Email"] = ("CSM Email", "first")
-            if "Customer CC Email" in cf.columns:
-                agg_dict["Customer_CC"] = ("Customer CC Email", "first")
+            # Only include columns that actually exist in cf
+            agg_dict = {}
+            if "email"          in cf.columns: agg_dict["Email"]     = ("email",          "first")
+            if "CSM"            in cf.columns: agg_dict["CSM"]       = ("CSM",            "first")
+            if "RAG"            in cf.columns: agg_dict["RAG"]       = ("RAG",            "first")
+            if "invoice_number" in cf.columns: agg_dict["Invoices"]  = ("invoice_number", "count")
+            if "Aging"          in cf.columns: agg_dict["Max_Aging"] = ("Aging",          "max")
+            if "CSM Email"      in cf.columns: agg_dict["CSM_Email"] = ("CSM Email",      "first")
+            if "Customer CC Email" in cf.columns: agg_dict["Customer_CC"] = ("Customer CC Email", "first")
 
-            cust_summary = (cf.groupby("customer_name").agg(**agg_dict)
-                              .reset_index()
-                              .sort_values("Max_Aging", ascending=False))
+            cust_summary = cf.groupby("customer_name").agg(**agg_dict).reset_index()
+            if "Max_Aging" in cust_summary.columns:
+                cust_summary = cust_summary.sort_values("Max_Aging", ascending=False)
 
             # Build per-customer currency-wise outstanding string
             # e.g. "₹4,838,819  |  $529,867"
