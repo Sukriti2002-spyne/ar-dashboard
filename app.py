@@ -2365,17 +2365,59 @@ with tab_email:
             if "Customer_CC" in cust_summary.columns:
                 col_order.append("Customer_CC")
             cust_summary = cust_summary[[c for c in col_order if c in cust_summary.columns]]
-            cust_summary.insert(0, "Send?", False)
+
+            # ── Upload a customer list to auto-select ─────────────────────────
+            with st.expander("📂 Auto-select from uploaded list", expanded=False):
+                st.caption("Upload a CSV or Excel file with a column named **customer_name** "
+                           "(or any column — first column is used as fallback).")
+                _upload_file = st.file_uploader(
+                    "Upload customer list", type=["csv", "xlsx", "xls"],
+                    key="cust_list_upload", label_visibility="collapsed"
+                )
+                _auto_selected_names: set = set()
+                if _upload_file is not None:
+                    try:
+                        if _upload_file.name.endswith(".csv"):
+                            _ul_df = pd.read_csv(_upload_file)
+                        else:
+                            _ul_df = pd.read_excel(_upload_file)
+                        # Find customer_name column (case-insensitive) or use first column
+                        _cn_col = next(
+                            (c for c in _ul_df.columns
+                             if c.strip().lower() in ("customer_name", "customer name",
+                                                       "customername", "name")),
+                            _ul_df.columns[0]
+                        )
+                        _auto_selected_names = set(
+                            _ul_df[_cn_col].dropna().astype(str).str.strip().tolist()
+                        )
+                        st.success(f"✅ {len(_auto_selected_names)} customer name(s) loaded from **{_upload_file.name}** — "
+                                   f"matching rows will be pre-selected below.")
+                        # Show which names matched / didn't match
+                        _all_cust = set(cust_summary["customer_name"].astype(str).tolist())
+                        _matched   = _auto_selected_names & _all_cust
+                        _unmatched = _auto_selected_names - _all_cust
+                        st.caption(f"Matched: **{len(_matched)}**   |   Not found in current data: **{len(_unmatched)}**"
+                                   + (f" — {sorted(_unmatched)}" if _unmatched else ""))
+                    except Exception as _ul_err:
+                        st.error(f"Could not read file: {_ul_err}")
+
+            # Pre-tick Send? for uploaded names; default False for others
+            cust_summary.insert(
+                0, "Send?",
+                cust_summary["customer_name"].astype(str).isin(_auto_selected_names)
+                if _auto_selected_names else False
+            )
 
             edited_cust = st.data_editor(
                 cust_summary, use_container_width=True, height=360,
                 disabled=[c for c in cust_summary.columns if c != "Send?"],
                 column_config={
-                    "Send?":          st.column_config.CheckboxColumn("Send?", default=False),
+                    "Send?":            st.column_config.CheckboxColumn("Send?", default=False),
                     "Outstanding (FC)": st.column_config.TextColumn("Outstanding (FC)"),
-                    "Customer_CC":    st.column_config.TextColumn("Customer CC Email"),
-                    "Max_Aging":      st.column_config.NumberColumn("Max Aging (days)", format="%d"),
-                    "Invoices":       st.column_config.NumberColumn("# Invoices", format="%d"),
+                    "Customer_CC":      st.column_config.TextColumn("Customer CC Email"),
+                    "Max_Aging":        st.column_config.NumberColumn("Max Aging (days)", format="%d"),
+                    "Invoices":         st.column_config.NumberColumn("# Invoices", format="%d"),
                 },
                 key="cust_email_selector",
             )
