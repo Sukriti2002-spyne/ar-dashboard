@@ -894,7 +894,9 @@ COLUMN_ALIASES = {
     "CSM":                       ["csm", "customer success manager", "account manager", "am"],
     "CSM Email":                 ["csm email", "csm_email", "csm email address"],
     "Customer CC Email":         ["customer cc email", "customer_cc_email", "cc email",
-                                  "customer cc", "cc_email", "client cc email"],
+                                  "customer cc", "cc_email", "client cc email",
+                                  "customer cc emails", "customer_cc_emails",
+                                  "cc emails", "cc_emails"],
     "payment_link":              ["zohosecurepay", "zoho secure pay", "zoho securepay",
                                   "payment link", "payment_link", "pay link", "pay_link",
                                   "secure pay link", "secure payment link", "payment url"],
@@ -2214,6 +2216,8 @@ with tab_email:
                          "Outstanding (FC)","Max_Aging"]
             if "CSM_Email" in cust_summary.columns:
                 col_order.append("CSM_Email")
+            if "Customer_CC" in cust_summary.columns:
+                col_order.append("Customer_CC")
             cust_summary = cust_summary[[c for c in col_order if c in cust_summary.columns]]
             cust_summary.insert(0, "Send?", False)
 
@@ -2223,6 +2227,7 @@ with tab_email:
                 column_config={
                     "Send?":          st.column_config.CheckboxColumn("Send?", default=False),
                     "Outstanding (FC)": st.column_config.TextColumn("Outstanding (FC)"),
+                    "Customer_CC":    st.column_config.TextColumn("Customer CC Email"),
                     "Max_Aging":      st.column_config.NumberColumn("Max Aging (days)", format="%d"),
                     "Invoices":       st.column_config.NumberColumn("# Invoices", format="%d"),
                 },
