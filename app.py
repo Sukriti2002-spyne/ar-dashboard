@@ -1361,50 +1361,59 @@ _FIXED_SHEET_URL = "https://docs.google.com/spreadsheets/d/1pY_hPKVa8A-d6kbCnsuR
 
 file_bytes = None
 
-# ── Top banner: logo + title + user + refresh ─────────────────────────────────
-_banner_left, _banner_right = st.columns([5, 1])
-with _banner_left:
-    _uname_display = st.session_state.get("_username", "user").title()
+# ── Top banner: logo | title | refresh ────────────────────────────────────────
+# Use st.columns for layout (avoids flex-clipping in st.markdown)
+_uname_display = st.session_state.get("_username", "user").title()
 
-    # Build logo HTML — use base64 PNG if available, else colourful text fallback
+# Shared banner background injected via CSS on a known class
+st.markdown("""
+<style>
+[data-testid="stHorizontalBlock"]:has(> div > [data-testid="stColumn"] > div > .banner-logo) {
+    background: linear-gradient(135deg,#0f172a 0%,#0d2b52 55%,#1e3a8a 100%);
+    border-radius: 14px;
+    border: 1px solid rgba(96,165,250,0.15);
+    box-shadow: 0 4px 24px rgba(0,0,0,0.35);
+    padding: 4px 0;
+    margin-bottom: 6px;
+}
+</style>
+""", unsafe_allow_html=True)
+
+_col_logo, _col_title, _col_refresh = st.columns([2, 6, 2])
+
+with _col_logo:
     if _LOGO_B64:
-        _logo_html = (
+        st.markdown(
+            f'<div class="banner-logo" style="padding:18px 0 14px 20px;">'
             f'<img src="data:image/png;base64,{_LOGO_B64}" '
-            f'style="height:48px;max-width:160px;object-fit:contain;'
-            f'filter:brightness(0) invert(1);" />'   # invert to white for dark bg
+            f'style="height:44px;max-width:150px;object-fit:contain;'
+            f'filter:brightness(0) invert(1);display:block;" /></div>',
+            unsafe_allow_html=True,
         )
     else:
-        _logo_html = (
-            '<span style="font-size:26px;font-weight:900;color:#fff;'
-            'letter-spacing:-1px;">spyne</span>'
+        st.markdown(
+            '<div class="banner-logo" style="padding:18px 0 14px 20px;">'
+            '<span style="font-size:28px;font-weight:900;color:#fff;'
+            'letter-spacing:-1px;font-family:Arial,sans-serif;">spyne</span></div>',
+            unsafe_allow_html=True,
         )
 
-    st.markdown(f"""
-    <div style="background:linear-gradient(135deg,#0f172a 0%,#0d2b52 55%,#1e3a8a 100%);
-                border-radius:14px;padding:20px 28px 16px 28px;
-                display:flex;align-items:center;gap:20px;
-                box-shadow:0 4px 24px rgba(0,0,0,0.35);
-                border:1px solid rgba(96,165,250,0.15);margin-bottom:4px;">
-      <div style="flex-shrink:0;display:flex;align-items:center;">
-        {_logo_html}
-      </div>
-      <div style="width:1px;height:48px;background:rgba(255,255,255,0.15);flex-shrink:0;"></div>
-      <div style="flex:1;">
-        <div style="color:#f1f5f9;font-size:22px;font-weight:800;
-                    letter-spacing:-0.5px;line-height:1.1;">AR Collections Dashboard</div>
-        <div style="color:#64748b;font-size:12px;margin-top:5px;display:flex;
-                    align-items:center;gap:12px;">
-          <span style="color:#475569;">Finance Team · Collections · Aging · Reminders</span>
-          <span style="background:rgba(96,165,250,0.12);color:#93c5fd;
-                       border:1px solid rgba(96,165,250,0.25);border-radius:20px;
-                       padding:2px 10px;font-size:11px;font-weight:600;">👤 {_uname_display}</span>
-        </div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+with _col_title:
+    st.markdown(
+        f'<div style="padding:14px 0 10px 8px;">'
+        f'<div style="color:#f1f5f9;font-size:22px;font-weight:800;'
+        f'letter-spacing:-0.5px;line-height:1.2;">AR Collections Dashboard</div>'
+        f'<div style="color:#64748b;font-size:12px;margin-top:4px;">'
+        f'Finance Team &nbsp;·&nbsp; Collections &nbsp;·&nbsp; Aging &nbsp;·&nbsp; Reminders'
+        f'&nbsp;&nbsp;<span style="background:rgba(96,165,250,0.12);color:#93c5fd;'
+        f'border:1px solid rgba(96,165,250,0.25);border-radius:20px;'
+        f'padding:2px 10px;font-size:11px;font-weight:600;">👤 {_uname_display}</span>'
+        f'</div></div>',
+        unsafe_allow_html=True,
+    )
 
-with _banner_right:
-    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+with _col_refresh:
+    st.markdown("<div style='padding-top:14px;'></div>", unsafe_allow_html=True)
     if st.button("🔄 Refresh Data", use_container_width=True, type="primary"):
         fetch_gsheet.clear()
         st.session_state.pop("_gs_file_bytes", None)
