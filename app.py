@@ -785,19 +785,36 @@ def init_db():
                 subject      TEXT,
                 sent_at      TEXT,
                 status       TEXT,
-                error        TEXT
+                error        TEXT,
+                template     TEXT
             )
         """)
+        # Migrate: add template column if it doesn't exist yet
+        try:
+            conn.execute("ALTER TABLE sent_emails ADD COLUMN template TEXT")
+        except Exception:
+            pass  # column already exists
 
 
-def log_email(invoice_no, customer, to_email, cc_emails, subject, status, error=""):
+def log_email(invoice_nos, customer, to_email, cc_emails, subject, status,
+              error="", template=""):
+    """Log one row per invoice_no so reminder counts work correctly.
+    invoice_nos can be a single string or a list of strings.
+    """
+    from datetime import timezone, timedelta
+    _IST = timezone(timedelta(hours=5, minutes=30))
+    sent_at = datetime.now(_IST).isoformat()
+
+    if isinstance(invoice_nos, str):
+        invoice_nos = [invoice_nos]
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("""
-            INSERT INTO sent_emails
-                (invoice_no, customer, to_email, cc_emails, subject, sent_at, status, error)
-            VALUES (?,?,?,?,?,?,?,?)
-        """, (invoice_no, customer, to_email, cc_emails, subject,
-              datetime.now().isoformat(), status, error))
+        for inv_no in invoice_nos:
+            conn.execute("""
+                INSERT INTO sent_emails
+                    (invoice_no, customer, to_email, cc_emails, subject, sent_at, status, error, template)
+                VALUES (?,?,?,?,?,?,?,?,?)
+            """, (str(inv_no).strip(), customer, to_email, cc_emails, subject,
+                  sent_at, status, error, template))
 
 
 def get_sent_log():
@@ -805,6 +822,19 @@ def get_sent_log():
         return pd.read_sql(
             "SELECT * FROM sent_emails ORDER BY sent_at DESC", conn
         )
+
+
+def get_reminder_counts() -> dict:
+    """Return {invoice_no: sent_count} for all successfully sent emails."""
+    with sqlite3.connect(DB_PATH) as conn:
+        df = pd.read_sql(
+            "SELECT invoice_no, COUNT(*) as cnt FROM sent_emails "
+            "WHERE status='sent' GROUP BY invoice_no",
+            conn,
+        )
+    if df.empty:
+        return {}
+    return dict(zip(df["invoice_no"], df["cnt"]))
 
 
 def upsert_reason(level, identifier, category, text, owner, next_dt):
@@ -1951,6 +1981,10 @@ with tab_invoices:
     display = filtered[base_cols].sort_values("balance", ascending=False).copy()
     display["invoice_number"] = display["invoice_number"].astype(str)
 
+    # ── Reminder count per invoice ────────────────────────────────────────────
+    _reminder_counts = get_reminder_counts()
+    display["Reminders Sent"] = display["invoice_number"].map(_reminder_counts).fillna(0).astype(int)
+
     # Build a formatted "Amount" column: currency symbol + balance
     if "balance" in display.columns and "currency_code" in display.columns:
         display["Amount"] = display.apply(
@@ -2316,8 +2350,10 @@ with tab_email:
                     try:
                         send_reminder(SMTP_CFG, actual_to, actual_cc, subject, html,
                                       attachments=attachments or None)
-                        log_email("(consolidated)", cname, actual_to,
-                                  ", ".join(actual_cc), subject, "sent")
+                        inv_nos_sent = list(cust_invs["invoice_number"].dropna().astype(str).unique()) if "invoice_number" in cust_invs.columns else ["(consolidated)"]
+                        log_email(inv_nos_sent, cname, actual_to,
+                                  ", ".join(actual_cc), subject, "sent",
+                                  template=selected_template)
                         ok += 1
                         status = f"✅ Sent" + (f" ({len(attachments)} PDF(s))" if attachments else "")
                         results.append({"Customer": cname, "To": actual_to,
@@ -2325,8 +2361,10 @@ with tab_email:
                                         "Status": status,
                                         "PDFs": " | ".join(pdf_notes) if pdf_notes else "—"})
                     except Exception as e:
-                        log_email("(consolidated)", cname, actual_to,
-                                  ", ".join(actual_cc), subject, "failed", str(e))
+                        inv_nos_sent = list(cust_invs["invoice_number"].dropna().astype(str).unique()) if "invoice_number" in cust_invs.columns else ["(consolidated)"]
+                        log_email(inv_nos_sent, cname, actual_to,
+                                  ", ".join(actual_cc), subject, "failed", str(e),
+                                  template=selected_template)
                         fail += 1
                         results.append({"Customer": cname, "To": actual_to,
                                         "Status": f"❌ {e}",
@@ -2511,13 +2549,15 @@ with tab_email:
                 try:
                     send_reminder(SMTP_CFG, actual_to, actual_cc, subject, html,
                                   attachments=attachments_inv or None)
-                    log_email(inv_no, customer, actual_to, ", ".join(actual_cc), subject, "sent")
+                    log_email(inv_no, customer, actual_to, ", ".join(actual_cc), subject, "sent",
+                              template=selected_template)
                     ok2 += 1
                     status2 = "✅ Sent" + (" (PDF attached)" if attachments_inv else "")
                     results2.append({"Invoice": inv_no, "To": actual_to,
                                      "Status": status2, "PDF": pdf_note_inv})
                 except Exception as e:
-                    log_email(inv_no, customer, actual_to, ", ".join(actual_cc), subject, "failed", str(e))
+                    log_email(inv_no, customer, actual_to, ", ".join(actual_cc), subject, "failed", str(e),
+                              template=selected_template)
                     fail2 += 1
                     results2.append({"Invoice": inv_no, "To": actual_to,
                                      "Status": f"❌ {e}", "PDF": pdf_note_inv})
@@ -2534,13 +2574,66 @@ with tab_email:
         st.subheader("📋 Sent Email Log")
         log_df = get_sent_log()
         if not log_df.empty:
-            log_df["sent_at"] = log_df["sent_at"].str[:19]
-            display_log = log_df[["sent_at","invoice_no","customer","to_email",
-                                   "cc_emails","subject","status","error"]].copy()
-            display_log.columns = ["Sent At","Invoice","Customer","To","CC","Subject","Status","Error"]
-            st.dataframe(display_log, use_container_width=True, height=400, hide_index=True)
-            st.download_button("⬇ Download Log", data=export_excel(display_log),
-                               file_name="sent_email_log.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            # ── Format sent_at as readable IST string ──────────────────────────
+            from datetime import timezone, timedelta
+            _IST = timezone(timedelta(hours=5, minutes=30))
+
+            def _fmt_ist(ts_str):
+                try:
+                    dt = datetime.fromisoformat(str(ts_str).strip())
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=_IST)
+                    else:
+                        dt = dt.astimezone(_IST)
+                    return dt.strftime("%d %b %Y, %I:%M %p IST")
+                except Exception:
+                    return str(ts_str)[:19]
+
+            log_df["sent_at_fmt"] = log_df["sent_at"].apply(_fmt_ist)
+
+            # ── Build display dataframe ────────────────────────────────────────
+            cols_available = [c for c in ["sent_at_fmt","invoice_no","customer","to_email",
+                                           "cc_emails","subject","template","status","error"]
+                              if c in log_df.columns or c == "sent_at_fmt"]
+            # template column may not exist in old rows — fill blank
+            if "template" not in log_df.columns:
+                log_df["template"] = ""
+
+            display_log = log_df[["sent_at_fmt","invoice_no","customer","to_email",
+                                   "cc_emails","subject","template","status","error"]].copy()
+            display_log.columns = ["Sent At (IST)","Invoice","Customer","To","CC",
+                                    "Subject","Template","Status","Error"]
+
+            # ── Summary KPIs ──────────────────────────────────────────────────
+            total_sent = (display_log["Status"] == "sent").sum()
+            total_failed = (display_log["Status"] == "failed").sum()
+            unique_customers = display_log["Customer"].nunique()
+            unique_invoices = display_log["Invoice"].nunique()
+
+            lk1, lk2, lk3, lk4 = st.columns(4)
+            lk1.metric("Total Reminders Sent", total_sent)
+            lk2.metric("Failed", total_failed)
+            lk3.metric("Unique Customers", unique_customers)
+            lk4.metric("Unique Invoices", unique_invoices)
+
+            st.divider()
+
+            # ── Optional search filter ────────────────────────────────────────
+            _log_search = st.text_input("🔍 Search log (customer, invoice, subject…)", key="log_search")
+            if _log_search.strip():
+                _mask = display_log.apply(
+                    lambda row: row.astype(str).str.contains(_log_search.strip(), case=False).any(),
+                    axis=1
+                )
+                display_log = display_log[_mask]
+
+            st.dataframe(display_log, use_container_width=True, height=450, hide_index=True)
+
+            st.download_button(
+                "⬇ Download Log",
+                data=export_excel(display_log),
+                file_name="sent_email_log.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
         else:
             st.info("No emails sent yet.")
