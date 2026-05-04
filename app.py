@@ -772,6 +772,122 @@ def fetch_zoho_payment_links(invoice_numbers: list, access_token: str,
     return links, errors
 
 
+# ── Zoho Books · Full invoice + line-item pull ────────────────────────────────
+
+def _zoho_list_invoices_page(access_token: str, org_id: str, api_host: str,
+                              page: int = 1, per_page: int = 200,
+                              status: str = "") -> dict:
+    """Fetch one page of invoices from Zoho Books."""
+    params = {"organization_id": org_id, "page": page, "per_page": per_page,
+              "sort_column": "date", "sort_order": "D"}
+    if status:
+        params["status"] = status
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+    resp = requests.get(f"https://{api_host}/books/v3/invoices",
+                        params=params, headers=headers, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def fetch_zoho_all_invoices(access_token: str, org_ids: list, dc: str,
+                             statuses: list | None = None) -> pd.DataFrame:
+    """
+    Pull ALL invoices across all org_ids from Zoho Books.
+    statuses: list of Zoho status strings, e.g. ['overdue','sent','draft']
+              Pass None/[] to fetch all statuses.
+    Returns a DataFrame with canonical column names ready for load_data().
+    """
+    _, api_host = ZOHO_DC_MAP.get(dc, ZOHO_DC_MAP["US (.com)"])
+    all_rows = []
+
+    fetch_statuses = statuses if statuses else [None]   # None = no status filter
+
+    for org_id in org_ids:
+        for status in fetch_statuses:
+            page = 1
+            while True:
+                data = _zoho_list_invoices_page(
+                    access_token, org_id, api_host, page=page, status=status or "")
+                invoices = data.get("invoices", [])
+                for inv in invoices:
+                    # Pull custom fields into a flat dict
+                    cf = {f.get("label","").lower().strip(): f.get("value","")
+                          for f in inv.get("custom_fields", [])}
+                    all_rows.append({
+                        "invoice_number":         inv.get("invoice_number",""),
+                        "customer_name":          inv.get("customer_name",""),
+                        "email":                  inv.get("email",""),
+                        "date":                   inv.get("date",""),
+                        "due_date":               inv.get("due_date",""),
+                        "Current Invoice Status": inv.get("status","").title(),
+                        "currency_code":          inv.get("currency_code",""),
+                        "total":                  float(inv.get("total") or 0),
+                        "balance":                float(inv.get("balance") or 0),
+                        "Final USD":              float(inv.get("balance") or 0),
+                        "Outstanding":            float(inv.get("balance") or 0),
+                        "CSM":                    inv.get("salesperson_name",""),
+                        "CSM Email":              inv.get("salesperson_email",""),
+                        "payment_link":           inv.get("payment_link","") or
+                                                  inv.get("invoice_url",""),
+                        "_zoho_invoice_id":       inv.get("invoice_id",""),
+                        "_zoho_org_id":           org_id,
+                        # Merge useful custom fields
+                        **{k: cf.get(k,"") for k in ("product","service type","country","billing terms")},
+                    })
+                page_ctx = data.get("page_context", {})
+                if not page_ctx.get("has_more_page", False):
+                    break
+                page += 1
+
+    if not all_rows:
+        return pd.DataFrame()
+
+    df_z = pd.DataFrame(all_rows).drop_duplicates(subset=["invoice_number","_zoho_org_id"])
+    # Parse dates
+    for dcol in ("date", "due_date"):
+        df_z[dcol] = pd.to_datetime(df_z[dcol], errors="coerce")
+    return df_z
+
+
+def fetch_zoho_lineitems_for_invoices(invoice_ids: list, access_token: str,
+                                      org_id: str, dc: str,
+                                      progress_cb=None) -> pd.DataFrame:
+    """
+    Fetch line items (product-level) for a list of Zoho invoice IDs.
+    Returns a DataFrame: invoice_number, product, description, qty, rate, amount, tax.
+    progress_cb(i, total) is called each iteration if provided.
+    """
+    _, api_host = ZOHO_DC_MAP.get(dc, ZOHO_DC_MAP["US (.com)"])
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+    rows = []
+    for i, (inv_id, inv_number) in enumerate(invoice_ids):
+        if progress_cb:
+            progress_cb(i, len(invoice_ids))
+        try:
+            resp = requests.get(
+                f"https://{api_host}/books/v3/invoices/{inv_id}",
+                params={"organization_id": org_id},
+                headers=headers, timeout=20,
+            )
+            resp.raise_for_status()
+            inv_detail = resp.json().get("invoice", {})
+            for li in inv_detail.get("line_items", []):
+                rows.append({
+                    "invoice_number": inv_number,
+                    "product":        li.get("name",""),
+                    "description":    li.get("description",""),
+                    "quantity":       float(li.get("quantity") or 0),
+                    "unit":           li.get("unit",""),
+                    "rate":           float(li.get("rate") or 0),
+                    "amount":         float(li.get("item_total") or 0),
+                    "tax_name":       li.get("tax_name",""),
+                    "tax_pct":        float(li.get("tax_percentage") or 0),
+                })
+        except Exception:
+            pass
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
@@ -1423,31 +1539,149 @@ with _col_refresh:
         st.session_state["_gs_last_refresh"] = None
         st.rerun()
 
-# ── Load from sheet (cached; only re-fetched after Refresh button) ────────────
-if "_gs_file_bytes" not in st.session_state or st.session_state["_gs_file_bytes"] is None:
-    with st.spinner("Loading data from Google Sheets…"):
-        try:
-            file_bytes = fetch_gsheet(_FIXED_SHEET_URL)
-            st.session_state["_gs_file_bytes"]   = file_bytes
-            st.session_state["_gs_last_refresh"] = time.time()
-        except PermissionError as e:
-            st.error(str(e))
-            st.stop()
-        except Exception as e:
-            st.error(f"Error loading sheet: {e}")
-            st.stop()
-else:
-    file_bytes = st.session_state["_gs_file_bytes"]
-
-# ── Last-refreshed timestamp ──────────────────────────────────────────────────
-_last = st.session_state.get("_gs_last_refresh")
+# ── Data source selector ──────────────────────────────────────────────────────
+from datetime import timezone, timedelta
+_IST        = timezone(timedelta(hours=5, minutes=30))
 _ist_time_str = ""
-if _last:
-    from datetime import timezone, timedelta
-    _IST = timezone(timedelta(hours=5, minutes=30))
-    _ist_time_str = datetime.fromtimestamp(_last, tz=_IST).strftime('%d %b %Y, %I:%M:%S %p IST')
 
-df = load_data(file_bytes)
+_src_tab_gs, _src_tab_zoho = st.tabs(["📄 Google Sheets", "🔗 Zoho Books (Live)"])
+
+# ════════════════════════ SOURCE A · GOOGLE SHEETS ════════════════════════════
+with _src_tab_gs:
+    st.caption("Data is loaded from the fixed Google Sheet. Click **Refresh Data** (top-right) to re-fetch.")
+    if "_gs_file_bytes" not in st.session_state or st.session_state["_gs_file_bytes"] is None:
+        with st.spinner("Loading data from Google Sheets…"):
+            try:
+                file_bytes = fetch_gsheet(_FIXED_SHEET_URL)
+                st.session_state["_gs_file_bytes"]   = file_bytes
+                st.session_state["_gs_last_refresh"] = time.time()
+                st.session_state["_active_source"]   = "gsheet"
+            except PermissionError as e:
+                st.error(str(e)); st.stop()
+            except Exception as e:
+                st.error(f"Error loading sheet: {e}"); st.stop()
+    else:
+        file_bytes = st.session_state["_gs_file_bytes"]
+        st.session_state.setdefault("_active_source", "gsheet")
+
+# ════════════════════════ SOURCE B · ZOHO BOOKS ═══════════════════════════════
+with _src_tab_zoho:
+    # Need credentials to be loaded first
+    _zoho_ready_now = all([
+        st.session_state.get("zoho_client_id","").strip(),
+        st.session_state.get("zoho_client_secret","").strip(),
+        st.session_state.get("zoho_refresh_token","").strip(),
+        [o.strip() for o in [st.session_state.get("zoho_org_id_1",""),
+                              st.session_state.get("zoho_org_id_2","")] if o.strip()],
+    ])
+
+    if not _zoho_ready_now:
+        st.warning("⚙️ Zoho credentials not configured. Add them to `.streamlit/secrets.toml`.")
+    else:
+        _zb_c1, _zb_c2, _zb_c3 = st.columns([2, 2, 3])
+        with _zb_c1:
+            _zoho_statuses = st.multiselect(
+                "Invoice Statuses to fetch",
+                ["overdue", "sent", "draft", "paid", "partially_paid", "void"],
+                default=["overdue", "sent"],
+                key="zoho_pull_statuses",
+            )
+        with _zb_c2:
+            _fetch_lineitems = st.checkbox(
+                "📦 Include line items (products)",
+                value=False, key="zoho_pull_lineitems",
+                help="Fetches product/service details per invoice. Slower for large datasets."
+            )
+        with _zb_c3:
+            st.markdown("<div style='padding-top:22px'></div>", unsafe_allow_html=True)
+            _pull_zoho = st.button("🔗 Pull from Zoho Books", type="primary",
+                                   use_container_width=True, key="pull_zoho_btn")
+
+        if _pull_zoho:
+            try:
+                with st.spinner("🔑 Authenticating with Zoho Books…"):
+                    _z_org_ids = [o.strip() for o in [
+                        st.session_state.get("zoho_org_id_1",""),
+                        st.session_state.get("zoho_org_id_2",""),
+                    ] if o.strip()]
+                    _z_dc = st.session_state.get("zoho_dc", "US (.com)")
+                    _z_token = get_zoho_token(
+                        st.session_state["zoho_client_id"],
+                        st.session_state["zoho_client_secret"],
+                        st.session_state["zoho_refresh_token"],
+                        _z_dc,
+                    )
+                with st.spinner(f"📥 Fetching invoices ({', '.join(_zoho_statuses)}) from Zoho Books…"):
+                    _z_df = fetch_zoho_all_invoices(_z_token, _z_org_ids, _z_dc,
+                                                    statuses=_zoho_statuses)
+
+                if _z_df.empty:
+                    st.warning("No invoices returned from Zoho Books for the selected statuses.")
+                else:
+                    # Optional line items
+                    if _fetch_lineitems:
+                        _li_pairs = list(zip(
+                            _z_df["_zoho_invoice_id"].tolist(),
+                            _z_df["invoice_number"].tolist(),
+                        ))
+                        _prog = st.progress(0, text="Fetching line items…")
+                        def _li_prog(i, total):
+                            _prog.progress(int(i / max(total,1) * 100),
+                                           text=f"Line items: {i}/{total}")
+                        # Use first org_id that has invoices
+                        _li_org = _z_org_ids[0]
+                        _li_df = fetch_zoho_lineitems_for_invoices(
+                            _li_pairs, _z_token, _li_org, _z_dc, _li_prog)
+                        _prog.empty()
+                        if not _li_df.empty:
+                            st.session_state["_zoho_lineitems"] = _li_df
+                            st.success(f"✅ {len(_li_df):,} line-item rows fetched")
+
+                    st.session_state["_zoho_df"]           = _z_df
+                    st.session_state["_zoho_last_refresh"] = time.time()
+                    st.session_state["_active_source"]     = "zoho"
+                    st.success(f"✅ {len(_z_df):,} invoices loaded from Zoho Books")
+            except Exception as _ze:
+                st.error(f"Zoho pull failed: {_ze}")
+
+        # Show last-pull info & line-items preview
+        if st.session_state.get("_active_source") == "zoho":
+            _zts = st.session_state.get("_zoho_last_refresh")
+            if _zts:
+                _zt_str = datetime.fromtimestamp(_zts, tz=_IST).strftime('%d %b %Y, %I:%M:%S %p IST')
+                st.caption(f"🕐 Zoho data as of **{_zt_str}**")
+
+            if "_zoho_lineitems" in st.session_state and not st.session_state["_zoho_lineitems"].empty:
+                with st.expander("📦 Line Items (Product-level)", expanded=False):
+                    _li_show = st.session_state["_zoho_lineitems"]
+                    st.dataframe(_li_show, use_container_width=True, height=300)
+                    st.download_button(
+                        "⬇ Download Line Items",
+                        data=export_excel(_li_show),
+                        file_name="zoho_line_items.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_lineitems",
+                    )
+
+# ── Resolve active DataFrame ──────────────────────────────────────────────────
+if st.session_state.get("_active_source") == "zoho" and "_zoho_df" in st.session_state:
+    _active_df_raw = st.session_state["_zoho_df"]
+    _zts = st.session_state.get("_zoho_last_refresh")
+    if _zts:
+        _ist_time_str = datetime.fromtimestamp(_zts, tz=_IST).strftime('%d %b %Y, %I:%M:%S %p IST')
+    df = load_data(_active_df_raw.to_excel(BytesIO(), index=False) or b"")   # re-use pipeline
+    # Simpler: directly set df from zoho dataframe (bypass load_data xlsx round-trip)
+    df = _active_df_raw.copy()
+    if "date" not in df.columns:
+        df["date"] = pd.NaT
+else:
+    # Google Sheets path
+    if "file_bytes" not in dir() or file_bytes is None:
+        file_bytes = st.session_state.get("_gs_file_bytes")
+    _last = st.session_state.get("_gs_last_refresh")
+    if _last:
+        _ist_time_str = datetime.fromtimestamp(_last, tz=_IST).strftime('%d %b %Y, %I:%M:%S %p IST')
+    df = load_data(file_bytes)
 
 # ── Exclude fully-paid / zero-balance invoices everywhere ─────────────────────
 if "balance" in df.columns:
