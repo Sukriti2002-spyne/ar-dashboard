@@ -2129,7 +2129,9 @@ with tab_csm:
     d4.metric("Customers", csm_detail["customer_name"].nunique())
 
     show_cols = [c for c in ["invoice_number","customer_name","Outstanding","Final USD","Aging","Bucket","RAG","due_date","Status","Product","country"] if c in csm_detail.columns]
-    csm_detail_show = csm_detail[show_cols].sort_values("Final USD", ascending=False)
+    csm_detail_show = csm_detail[show_cols].copy()
+    if "Final USD" in csm_detail_show.columns:
+        csm_detail_show = csm_detail_show.sort_values("Final USD", ascending=False)
     csm_detail_show = column_filters(csm_detail_show, key_prefix="csm_dd")
     st.dataframe(csm_detail_show, use_container_width=True)
 
@@ -2844,7 +2846,9 @@ with tab_email:
 
         sel_cols = [c for c in ["invoice_number","customer_name","email","CSM",
                                  "CSM Email","Final USD","Aging","Bucket","RAG"] if c in ef.columns]
-        sel_df = ef[sel_cols].sort_values("Aging", ascending=False).copy()
+        sel_df = ef[sel_cols].copy()
+        if "Aging" in sel_df.columns:
+            sel_df = sel_df.sort_values("Aging", ascending=False)
         sel_df.insert(0, "Send?", False)
 
         edited_sel = st.data_editor(
