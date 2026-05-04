@@ -893,6 +893,8 @@ COLUMN_ALIASES = {
     "Final USD":                 ["final usd", "final_usd", "amount usd", "usd amount", "outstanding usd"],
     "CSM":                       ["csm", "customer success manager", "account manager", "am"],
     "CSM Email":                 ["csm email", "csm_email", "csm email address"],
+    "Customer CC Email":         ["customer cc email", "customer_cc_email", "cc email",
+                                  "customer cc", "cc_email", "client cc email"],
     "payment_link":              ["zohosecurepay", "zoho secure pay", "zoho securepay",
                                   "payment link", "payment_link", "pay link", "pay_link",
                                   "secure pay link", "secure payment link", "payment url"],
@@ -2131,8 +2133,8 @@ with tab_email:
     st.divider()
     et1, et2, et3 = st.tabs(["🏢 By Customer", "🧾 By Invoice", "📋 Sent Log"])
 
-    def _build_cc(csm_email: str) -> list:
-        """Build CC list based on recipient toggles."""
+    def _build_cc(csm_email: str, customer_cc: str = "") -> list:
+        """Build CC list based on recipient toggles + optional customer CC email(s)."""
         cc = []
         if send_to_csm and csm_email and "@" in csm_email:
             cc.append(csm_email)
@@ -2140,6 +2142,11 @@ with tab_email:
             cc.append(FINANCE_CC)
         if send_to_other and other_email and "@" in other_email:
             cc.append(other_email)
+        # Customer CC Email column — may contain multiple addresses separated by comma/semicolon
+        for addr in re.split(r"[,;]+", str(customer_cc or "")):
+            addr = addr.strip()
+            if addr and "@" in addr and addr not in cc:
+                cc.append(addr)
         return cc
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -2179,6 +2186,8 @@ with tab_email:
             }
             if "CSM Email" in cf.columns:
                 agg_dict["CSM_Email"] = ("CSM Email", "first")
+            if "Customer CC Email" in cf.columns:
+                agg_dict["Customer_CC"] = ("Customer CC Email", "first")
 
             cust_summary = (cf.groupby("customer_name").agg(**agg_dict)
                               .reset_index()
@@ -2317,10 +2326,11 @@ with tab_email:
                 prog = st.progress(0, text="Sending…")
                 ok, fail, results = 0, 0, []
                 for idx, (_, crow) in enumerate(cust_to_send.iterrows()):
-                    cname     = crow["customer_name"]
-                    to_email  = str(crow.get("Email","")).strip() if send_to_customer else None
-                    csm_email = str(crow.get("CSM_Email", crow.get("CSM",""))).strip()
-                    cc_list   = _build_cc(csm_email)
+                    cname        = crow["customer_name"]
+                    to_email     = str(crow.get("Email","")).strip() if send_to_customer else None
+                    csm_email    = str(crow.get("CSM_Email", crow.get("CSM",""))).strip()
+                    customer_cc  = str(crow.get("Customer_CC", "")).strip()
+                    cc_list      = _build_cc(csm_email, customer_cc)
                     cust_invs = cf_send[cf_send["customer_name"]==cname]
                     subject, html = build_email(template_key, cname, cust_invs,
                                                 crow.get("CSM",""), c_note)
@@ -2520,9 +2530,10 @@ with tab_email:
                 enriched_row = ef_send[ef_send["invoice_number"].astype(str) == inv_no]
                 row_data  = enriched_row.iloc[0].to_dict() if not enriched_row.empty else row.to_dict()
 
-                to_email  = str(row.get("email","")).strip() if send_to_customer else None
-                csm_email = str(row.get("CSM Email","")).strip()
-                cc_list   = _build_cc(csm_email)
+                to_email     = str(row.get("email","")).strip() if send_to_customer else None
+                csm_email    = str(row.get("CSM Email","")).strip()
+                customer_cc  = str(row.get("Customer CC Email","")).strip()
+                cc_list      = _build_cc(csm_email, customer_cc)
                 customer  = str(row.get("customer_name",""))
                 subject, html = build_email(template_key, customer,
                                             pd.DataFrame([row_data]),
