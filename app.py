@@ -1344,18 +1344,79 @@ with st.sidebar:
         st.rerun()
     st.divider()
 
-st.title("📊 AR Collections Dashboard")
-
 # ── Fixed Google Sheet ────────────────────────────────────────────────────────
 _FIXED_SHEET_URL = "https://docs.google.com/spreadsheets/d/1pY_hPKVa8A-d6kbCnsuRdns4CiuRTh1QaIJRf5-ppOI/edit?gid=0#gid=0"
 
 file_bytes = None
 
-# ── Header row: title + refresh button ───────────────────────────────────────
-_hcol1, _hcol2 = st.columns([6, 1])
-with _hcol2:
+# ── Top banner: logo + title + user + refresh ─────────────────────────────────
+_banner_left, _banner_right = st.columns([5, 1])
+with _banner_left:
+    _uname_display = st.session_state.get("_username", "user").title()
+    st.markdown(f"""
+    <div style="
+        background: linear-gradient(135deg, #0f172a 0%, #0d2b52 55%, #1e3a8a 100%);
+        border-radius: 14px;
+        padding: 22px 28px 18px 28px;
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        box-shadow: 0 4px 24px rgba(0,0,0,0.35);
+        border: 1px solid rgba(96,165,250,0.15);
+        margin-bottom: 4px;
+    ">
+      <!-- Spyne Logo -->
+      <div style="flex-shrink:0;">
+        <img src="https://spyne.ai/favicon.ico"
+             style="width:52px;height:52px;border-radius:10px;
+                    background:#fff;padding:5px;object-fit:contain;
+                    box-shadow:0 2px 8px rgba(0,0,0,0.3);"
+             onerror="this.outerHTML='<div style=\\'width:52px;height:52px;border-radius:10px;background:linear-gradient(135deg,#2563eb,#7c3aed);display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:900;color:#fff;box-shadow:0 2px 8px rgba(0,0,0,0.3);\\'>S</div>'" />
+      </div>
+      <!-- Title block -->
+      <div style="flex:1;">
+        <div style="
+            color: #93c5fd;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.2em;
+            text-transform: uppercase;
+            margin-bottom: 3px;
+        ">SPYNE.AI · FINANCE TEAM</div>
+        <div style="
+            color: #f1f5f9;
+            font-size: 26px;
+            font-weight: 800;
+            letter-spacing: -0.5px;
+            line-height: 1.1;
+        ">AR Collections Dashboard</div>
+        <div style="
+            color: #64748b;
+            font-size: 12px;
+            margin-top: 5px;
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        ">
+          <span style="color:#475569;">Collections · Aging · Reminders</span>
+          <span style="
+              background:rgba(96,165,250,0.12);
+              color:#93c5fd;
+              border:1px solid rgba(96,165,250,0.25);
+              border-radius:20px;
+              padding:2px 10px;
+              font-size:11px;
+              font-weight:600;
+          ">👤 {_uname_display}</span>
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with _banner_right:
+    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
     if st.button("🔄 Refresh Data", use_container_width=True, type="primary"):
-        fetch_gsheet.clear()          # bust the cache so next call re-fetches
+        fetch_gsheet.clear()
         st.session_state.pop("_gs_file_bytes", None)
         st.session_state["_gs_last_refresh"] = None
         st.rerun()
@@ -1376,13 +1437,13 @@ if "_gs_file_bytes" not in st.session_state or st.session_state["_gs_file_bytes"
 else:
     file_bytes = st.session_state["_gs_file_bytes"]
 
-# ── Last-refreshed caption ────────────────────────────────────────────────────
+# ── Last-refreshed timestamp ──────────────────────────────────────────────────
 _last = st.session_state.get("_gs_last_refresh")
+_ist_time_str = ""
 if _last:
     from datetime import timezone, timedelta
     _IST = timezone(timedelta(hours=5, minutes=30))
-    _ist_time = datetime.fromtimestamp(_last, tz=_IST).strftime('%d %b %Y, %I:%M:%S %p IST')
-    st.caption(f"📄 Data as of **{_ist_time}** · Click **Refresh Data** to fetch latest.")
+    _ist_time_str = datetime.fromtimestamp(_last, tz=_IST).strftime('%d %b %Y, %I:%M:%S %p IST')
 
 df = load_data(file_bytes)
 
@@ -1488,6 +1549,57 @@ if country_sel:      fdf = fdf[fdf["country"].isin(country_sel)]                
 if product_sel:      fdf = fdf[fdf["Product"].isin(product_sel)]                     if "Product"                in fdf.columns else fdf
 if inv_status_sel and "Current Invoice Status" in fdf.columns:
     fdf = fdf[fdf["Current Invoice Status"].isin(inv_status_sel)]
+
+# ── KPI strip + last-refresh bar ─────────────────────────────────────────────
+_ks_total_usd   = fdf["Final USD"].sum()   if "Final USD"      in fdf.columns else 0
+_ks_customers   = fdf["customer_name"].nunique() if "customer_name" in fdf.columns else 0
+_ks_invoices    = len(fdf)
+_ks_overdue     = (fdf[fdf["RAG"] == "Red"]["Final USD"].sum()
+                   if "RAG" in fdf.columns and "Final USD" in fdf.columns else 0)
+_ks_avg_aging   = int(fdf["Aging"].mean()) if "Aging" in fdf.columns and len(fdf) else 0
+
+def _kpi_card(icon, label, value, accent="#60a5fa"):
+    return f"""
+    <div style="
+        background:rgba(255,255,255,0.03);
+        border:1px solid rgba(255,255,255,0.08);
+        border-radius:10px;
+        padding:12px 18px;
+        flex:1;
+        min-width:140px;
+    ">
+      <div style="color:{accent};font-size:18px;margin-bottom:2px;">{icon}</div>
+      <div style="color:#f1f5f9;font-size:20px;font-weight:800;line-height:1.1;">{value}</div>
+      <div style="color:#64748b;font-size:11px;font-weight:600;text-transform:uppercase;
+                  letter-spacing:0.06em;margin-top:3px;">{label}</div>
+    </div>"""
+
+_refresh_note = (f"<span style='color:#475569;font-size:11px;'>🕐 Data as of <b style='color:#64748b'>{_ist_time_str}</b></span>"
+                 if _ist_time_str else "")
+
+st.markdown(f"""
+<div style="
+    background:linear-gradient(135deg,#0f172a,#0d2b52);
+    border:1px solid rgba(96,165,250,0.12);
+    border-radius:12px;
+    padding:16px 22px 14px 22px;
+    margin-bottom:18px;
+    box-shadow:0 2px 12px rgba(0,0,0,0.25);
+">
+  <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:stretch;">
+    {_kpi_card("💵", "Total Outstanding (USD)", f"${_ks_total_usd:,.0f}", "#60a5fa")}
+    {_kpi_card("🔴", "At Risk (Red)", f"${_ks_overdue:,.0f}", "#f87171")}
+    {_kpi_card("🏢", "Customers", f"{_ks_customers:,}", "#34d399")}
+    {_kpi_card("🧾", "Invoices", f"{_ks_invoices:,}", "#a78bfa")}
+    {_kpi_card("⏳", "Avg Aging (days)", f"{_ks_avg_aging}", "#fbbf24")}
+  </div>
+  <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.05);">
+    {_refresh_note}
+    <span style="color:#334155;margin:0 8px;">·</span>
+    <span style="color:#475569;font-size:11px;">Click <b style='color:#64748b'>Refresh Data</b> to fetch latest from Google Sheets</span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
 # ── TABS ──────────────────────────────────────────────────────────────────────
 tab_overview, tab_csm, tab_customer, tab_invoices, tab_reasons, tab_email = st.tabs([
