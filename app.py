@@ -1382,21 +1382,24 @@ st.markdown("""
 _col_logo, _col_title, _col_refresh = st.columns([2, 6, 2])
 
 with _col_logo:
+    # Logo source: local base64 PNG → Clearbit CDN → nothing (CSS class still sets bg)
     if _LOGO_B64:
-        st.markdown(
-            f'<div class="banner-logo" style="padding:18px 0 14px 20px;">'
-            f'<img src="data:image/png;base64,{_LOGO_B64}" '
-            f'style="height:44px;max-width:150px;object-fit:contain;'
-            f'filter:brightness(0) invert(1);display:block;" /></div>',
-            unsafe_allow_html=True,
-        )
+        _logo_src = f"data:image/png;base64,{_LOGO_B64}"
     else:
-        st.markdown(
-            '<div class="banner-logo" style="padding:18px 0 14px 20px;">'
-            '<span style="font-size:28px;font-weight:900;color:#fff;'
-            'letter-spacing:-1px;font-family:Arial,sans-serif;">spyne</span></div>',
-            unsafe_allow_html=True,
-        )
+        _logo_src = "https://logo.clearbit.com/spyne.ai"
+
+    # White pill container so the full-colour logo is visible on dark AND light themes
+    st.markdown(
+        f'<div class="banner-logo" style="padding:16px 0 12px 20px;">'
+        f'<div style="background:#ffffff;border-radius:10px;padding:8px 14px;'
+        f'display:inline-block;box-shadow:0 2px 10px rgba(0,0,0,0.25);">'
+        f'<img src="{_logo_src}" '
+        f'style="height:36px;max-width:130px;object-fit:contain;display:block;" '
+        f'onerror="this.parentElement.innerHTML=\'<span style=&quot;font-size:22px;'
+        f'font-weight:900;color:#1e293b;letter-spacing:-1px;&quot;>spyne</span>\'" />'
+        f'</div></div>',
+        unsafe_allow_html=True,
+    )
 
 with _col_title:
     st.markdown(
