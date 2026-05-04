@@ -1558,48 +1558,30 @@ _ks_overdue     = (fdf[fdf["RAG"] == "Red"]["Final USD"].sum()
                    if "RAG" in fdf.columns and "Final USD" in fdf.columns else 0)
 _ks_avg_aging   = int(fdf["Aging"].mean()) if "Aging" in fdf.columns and len(fdf) else 0
 
-def _kpi_card(icon, label, value, accent="#60a5fa"):
-    return f"""
-    <div style="
-        background:rgba(255,255,255,0.03);
-        border:1px solid rgba(255,255,255,0.08);
-        border-radius:10px;
-        padding:12px 18px;
-        flex:1;
-        min-width:140px;
-    ">
-      <div style="color:{accent};font-size:18px;margin-bottom:2px;">{icon}</div>
-      <div style="color:#f1f5f9;font-size:20px;font-weight:800;line-height:1.1;">{value}</div>
-      <div style="color:#64748b;font-size:11px;font-weight:600;text-transform:uppercase;
-                  letter-spacing:0.06em;margin-top:3px;">{label}</div>
-    </div>"""
+# ── KPI cards — one st.markdown per column (avoids markdown parser issues) ────
+_kpi_data = [
+    ("💵", "Total Outstanding (USD)", f"${_ks_total_usd:,.0f}", "#60a5fa"),
+    ("🔴", "At Risk (Red)",           f"${_ks_overdue:,.0f}",   "#f87171"),
+    ("🏢", "Customers",               f"{_ks_customers:,}",     "#34d399"),
+    ("🧾", "Invoices",                f"{_ks_invoices:,}",      "#a78bfa"),
+    ("⏳", "Avg Aging (days)",        f"{_ks_avg_aging}",       "#fbbf24"),
+]
+_kpi_cols = st.columns(5)
+for _col, (_icon, _label, _val, _accent) in zip(_kpi_cols, _kpi_data):
+    _col.markdown(
+        f"<div style='background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);"
+        f"border-radius:10px;padding:14px 16px;'>"
+        f"<div style='color:{_accent};font-size:20px;margin-bottom:4px;'>{_icon}</div>"
+        f"<div style='color:#f1f5f9;font-size:22px;font-weight:800;line-height:1.1;'>{_val}</div>"
+        f"<div style='color:#64748b;font-size:11px;font-weight:600;text-transform:uppercase;"
+        f"letter-spacing:0.06em;margin-top:4px;'>{_label}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
-_refresh_note = (f"<span style='color:#475569;font-size:11px;'>🕐 Data as of <b style='color:#64748b'>{_ist_time_str}</b></span>"
-                 if _ist_time_str else "")
-
-st.markdown(f"""
-<div style="
-    background:linear-gradient(135deg,#0f172a,#0d2b52);
-    border:1px solid rgba(96,165,250,0.12);
-    border-radius:12px;
-    padding:16px 22px 14px 22px;
-    margin-bottom:18px;
-    box-shadow:0 2px 12px rgba(0,0,0,0.25);
-">
-  <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:stretch;">
-    {_kpi_card("💵", "Total Outstanding (USD)", f"${_ks_total_usd:,.0f}", "#60a5fa")}
-    {_kpi_card("🔴", "At Risk (Red)", f"${_ks_overdue:,.0f}", "#f87171")}
-    {_kpi_card("🏢", "Customers", f"{_ks_customers:,}", "#34d399")}
-    {_kpi_card("🧾", "Invoices", f"{_ks_invoices:,}", "#a78bfa")}
-    {_kpi_card("⏳", "Avg Aging (days)", f"{_ks_avg_aging}", "#fbbf24")}
-  </div>
-  <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.05);">
-    {_refresh_note}
-    <span style="color:#334155;margin:0 8px;">·</span>
-    <span style="color:#475569;font-size:11px;">Click <b style='color:#64748b'>Refresh Data</b> to fetch latest from Google Sheets</span>
-  </div>
-</div>
-""", unsafe_allow_html=True)
+# ── Last-refresh note ─────────────────────────────────────────────────────────
+if _ist_time_str:
+    st.caption(f"🕐 Data as of **{_ist_time_str}** · Click **Refresh Data** to fetch latest from Google Sheets")
 
 # ── TABS ──────────────────────────────────────────────────────────────────────
 tab_overview, tab_csm, tab_customer, tab_invoices, tab_reasons, tab_email = st.tabs([
