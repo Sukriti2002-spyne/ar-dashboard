@@ -1669,8 +1669,6 @@ if st.session_state.get("_active_source") == "zoho" and "_zoho_df" in st.session
     _zts = st.session_state.get("_zoho_last_refresh")
     if _zts:
         _ist_time_str = datetime.fromtimestamp(_zts, tz=_IST).strftime('%d %b %Y, %I:%M:%S %p IST')
-    df = load_data(_active_df_raw.to_excel(BytesIO(), index=False) or b"")   # re-use pipeline
-    # Simpler: directly set df from zoho dataframe (bypass load_data xlsx round-trip)
     df = _active_df_raw.copy()
     if "date" not in df.columns:
         df["date"] = pd.NaT
