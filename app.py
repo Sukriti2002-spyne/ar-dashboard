@@ -2138,6 +2138,17 @@ with tab_email:
     if not smtp_ready:
         st.warning("⚙️ Gmail credentials not configured. Add `smtp_user` and `smtp_pass` to your Streamlit secrets.")
 
+    # ── Column availability hint ───────────────────────────────────────────────
+    _cc_detected = "Customer CC Email" in fdf.columns
+    if _cc_detected:
+        _cc_populated = fdf["Customer CC Email"].astype(str).str.strip().replace({"nan":"","None":""}).ne("").sum()
+        st.success(f"✅ **Customer CC Email** column detected — {_cc_populated} invoice row(s) have a CC address.")
+    else:
+        # Show raw column names so user can spot the mismatch
+        _raw_cols = [c for c in fdf.columns if "cc" in c.lower() or "customer" in c.lower()]
+        _hint = f"Columns with 'customer'/'cc': `{', '.join(_raw_cols)}`" if _raw_cols else "No matching columns found."
+        st.warning(f"⚠️ **Customer CC Email** column not found in sheet. {_hint}")
+
     # ── Template & recipient config (shared across both sub-tabs) ─────────────
     cfg1, cfg2 = st.columns([2, 3])
     with cfg1:
@@ -2328,6 +2339,9 @@ with tab_email:
                 if send_to_finance:  recip_summary.append("finance@spyne.ai")
                 if send_to_other and other_email and "@" in other_email:
                     recip_summary.append(other_email)
+                _has_cust_cc = "Customer CC Email" in cf.columns and cf["Customer CC Email"].astype(str).str.strip().replace({"nan":"","None":""}).ne("").any()
+                if _has_cust_cc:
+                    recip_summary.append("Customer CC (from sheet)")
                 st.info("Sending to: " + " · ".join(recip_summary) if recip_summary else "No recipients selected")
 
             if send_cust and not cust_to_send.empty and smtp_ready:
@@ -2531,6 +2545,9 @@ with tab_email:
             if send_to_finance:  recip_inv.append("finance@spyne.ai")
             if send_to_other and other_email and "@" in other_email:
                 recip_inv.append(other_email)
+            _has_cust_cc_inv = "Customer CC Email" in ef.columns and ef["Customer CC Email"].astype(str).str.strip().replace({"nan":"","None":""}).ne("").any()
+            if _has_cust_cc_inv:
+                recip_inv.append("Customer CC (from sheet)")
             st.info("Sending to: " + " · ".join(recip_inv) if recip_inv else "No recipients selected")
 
         if send_clicked and not to_send.empty and smtp_ready:
