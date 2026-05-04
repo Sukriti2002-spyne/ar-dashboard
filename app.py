@@ -1163,7 +1163,7 @@ def column_filters(df: pd.DataFrame, key_prefix: str = "cf") -> pd.DataFrame:
 
 
 # ── Reason form (reusable) ────────────────────────────────────────────────────
-def reason_form(level: str, identifiers, label: str):
+def reason_form(level: str, identifiers, label: str, df_ref: pd.DataFrame = None):
     existing_all = get_reasons(level)
 
     left, right = st.columns([2, 3])
@@ -1219,6 +1219,45 @@ def reason_form(level: str, identifiers, label: str):
         display.columns = [label, "Category", "Notes", "Owner", "Next Action", "Last Updated"]
         display["Last Updated"] = display["Last Updated"].str[:10]
         display["Next Action"] = display["Next Action"].str[:10]
+
+        # ── For Customer level: join Invoice Value & Outstanding from live data ──
+        if level == "customer" and df_ref is not None and not df_ref.empty:
+            _cn = "customer_name"
+            if _cn in df_ref.columns:
+
+                def _cust_fc_string(cname, amount_col):
+                    """Return currency-aware formatted string (e.g. ₹12,34,567 | $1,234)."""
+                    rows = df_ref[df_ref[_cn] == cname]
+                    if amount_col not in rows.columns:
+                        return "—"
+                    has_curr = "currency_code" in rows.columns
+                    if has_curr:
+                        tmp = rows.copy()
+                        tmp["_curr"] = tmp["currency_code"].astype(str).str.strip().replace(
+                            {"": "INR", "nan": "INR", "NaN": "INR", "None": "INR"})
+                        parts = (tmp.groupby("_curr")[amount_col].sum()
+                                    .reset_index()
+                                    .sort_values(amount_col, ascending=False))
+                        return "  |  ".join(
+                            fmt_amount(r[amount_col], r["_curr"]) for _, r in parts.iterrows()
+                        ) or "—"
+                    return fmt_amount(rows[amount_col].sum(), "USD")
+
+                # Invoice Value = sum of 'total' (gross invoice amount in native currency)
+                _iv_col = "total"    if "total"    in df_ref.columns else \
+                          "Final USD" if "Final USD" in df_ref.columns else None
+                # Outstanding  = sum of 'balance' (remaining unpaid in native currency)
+                _ob_col = "balance"  if "balance"  in df_ref.columns else \
+                          "Final USD" if "Final USD" in df_ref.columns else None
+
+                _cust_names = display[label].tolist()
+                if _iv_col:
+                    display["Invoice Value"] = display[label].apply(
+                        lambda c: _cust_fc_string(c, _iv_col))
+                if _ob_col:
+                    display["Total Outstanding"] = display[label].apply(
+                        lambda c: _cust_fc_string(c, _ob_col))
+
         st.dataframe(display, use_container_width=True, height=300)
 
         dl_bytes = export_excel(display)
@@ -2086,7 +2125,7 @@ with tab_reasons:
 
     with rt2:
         st.markdown("Mark a reason / action for a specific **customer**.")
-        reason_form("customer", df["customer_name"].dropna().unique(), "Customer")
+        reason_form("customer", df["customer_name"].dropna().unique(), "Customer", df_ref=fdf)
 
     with rt3:
         st.markdown("Mark a reason / action for a specific **CSM**.")
