@@ -12,6 +12,7 @@ import requests
 import smtplib
 import ssl
 import time
+import base64
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -22,6 +23,17 @@ try:
     _AUTOREFRESH_AVAILABLE = True
 except ImportError:
     _AUTOREFRESH_AVAILABLE = False
+
+# ── Logo loader (base64 — works locally + on Streamlit Cloud) ─────────────────
+def _load_logo_b64(filename="spyne_logo.png") -> str | None:
+    path = os.path.join(os.path.dirname(__file__), filename)
+    try:
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    except Exception:
+        return None
+
+_LOGO_B64 = _load_logo_b64()
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -1353,61 +1365,39 @@ file_bytes = None
 _banner_left, _banner_right = st.columns([5, 1])
 with _banner_left:
     _uname_display = st.session_state.get("_username", "user").title()
+
+    # Build logo HTML — use base64 PNG if available, else colourful text fallback
+    if _LOGO_B64:
+        _logo_html = (
+            f'<img src="data:image/png;base64,{_LOGO_B64}" '
+            f'style="height:48px;max-width:160px;object-fit:contain;'
+            f'filter:brightness(0) invert(1);" />'   # invert to white for dark bg
+        )
+    else:
+        _logo_html = (
+            '<span style="font-size:26px;font-weight:900;color:#fff;'
+            'letter-spacing:-1px;">spyne</span>'
+        )
+
     st.markdown(f"""
-    <div style="
-        background: linear-gradient(135deg, #0f172a 0%, #0d2b52 55%, #1e3a8a 100%);
-        border-radius: 14px;
-        padding: 22px 28px 18px 28px;
-        display: flex;
-        align-items: center;
-        gap: 18px;
-        box-shadow: 0 4px 24px rgba(0,0,0,0.35);
-        border: 1px solid rgba(96,165,250,0.15);
-        margin-bottom: 4px;
-    ">
-      <!-- Spyne Logo -->
-      <div style="flex-shrink:0;">
-        <img src="https://spyne.ai/favicon.ico"
-             style="width:52px;height:52px;border-radius:10px;
-                    background:#fff;padding:5px;object-fit:contain;
-                    box-shadow:0 2px 8px rgba(0,0,0,0.3);"
-             onerror="this.outerHTML='<div style=\\'width:52px;height:52px;border-radius:10px;background:linear-gradient(135deg,#2563eb,#7c3aed);display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:900;color:#fff;box-shadow:0 2px 8px rgba(0,0,0,0.3);\\'>S</div>'" />
+    <div style="background:linear-gradient(135deg,#0f172a 0%,#0d2b52 55%,#1e3a8a 100%);
+                border-radius:14px;padding:20px 28px 16px 28px;
+                display:flex;align-items:center;gap:20px;
+                box-shadow:0 4px 24px rgba(0,0,0,0.35);
+                border:1px solid rgba(96,165,250,0.15);margin-bottom:4px;">
+      <div style="flex-shrink:0;display:flex;align-items:center;">
+        {_logo_html}
       </div>
-      <!-- Title block -->
+      <div style="width:1px;height:48px;background:rgba(255,255,255,0.15);flex-shrink:0;"></div>
       <div style="flex:1;">
-        <div style="
-            color: #93c5fd;
-            font-size: 11px;
-            font-weight: 700;
-            letter-spacing: 0.2em;
-            text-transform: uppercase;
-            margin-bottom: 3px;
-        ">SPYNE.AI · FINANCE TEAM</div>
-        <div style="
-            color: #f1f5f9;
-            font-size: 26px;
-            font-weight: 800;
-            letter-spacing: -0.5px;
-            line-height: 1.1;
-        ">AR Collections Dashboard</div>
-        <div style="
-            color: #64748b;
-            font-size: 12px;
-            margin-top: 5px;
-            display: flex;
-            align-items: center;
-            gap: 14px;
-        ">
-          <span style="color:#475569;">Collections · Aging · Reminders</span>
-          <span style="
-              background:rgba(96,165,250,0.12);
-              color:#93c5fd;
-              border:1px solid rgba(96,165,250,0.25);
-              border-radius:20px;
-              padding:2px 10px;
-              font-size:11px;
-              font-weight:600;
-          ">👤 {_uname_display}</span>
+        <div style="color:#f1f5f9;font-size:22px;font-weight:800;
+                    letter-spacing:-0.5px;line-height:1.1;">AR Collections Dashboard</div>
+        <div style="color:#64748b;font-size:12px;margin-top:5px;display:flex;
+                    align-items:center;gap:12px;">
+          <span style="color:#475569;">Finance Team · Collections · Aging · Reminders</span>
+          <span style="background:rgba(96,165,250,0.12);color:#93c5fd;
+                       border:1px solid rgba(96,165,250,0.25);border-radius:20px;
+                       padding:2px 10px;font-size:11px;font-weight:600;">👤 {_uname_display}</span>
         </div>
       </div>
     </div>
