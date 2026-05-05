@@ -165,6 +165,7 @@ def _load_users() -> dict:
             "sukriti": _default_pw,
             "yash":    _default_pw,
             "finance": _default_pw,
+            "vijay":   _hash_pw("vijay@2026"),
         }
     return users
 
