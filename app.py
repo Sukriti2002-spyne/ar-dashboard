@@ -2903,8 +2903,9 @@ with tab_email:
 
         b1, b2 = st.columns([2, 3])
         with b1:
+            _unique_custs = to_send["customer_name"].nunique() if "customer_name" in to_send.columns else len(to_send)
             send_clicked = st.button(
-                f"📤 Send {len(to_send)} Reminder(s)",
+                f"📤 Send {_unique_custs} Reminder(s)  ({len(to_send)} invoice(s))",
                 type="primary",
                 disabled=(len(to_send)==0 or not smtp_ready or
                           not any([send_to_customer, send_to_csm, send_to_finance,
@@ -2955,65 +2956,87 @@ with tab_email:
                     except Exception as pl_err:
                         st.warning(f"Payment links fetch failed: {pl_err}")
 
+            # ── Group selected invoices by customer → 1 email per customer ──────
+            _cust_groups = {}
+            for _, row in to_send.iterrows():
+                cname = str(row.get("customer_name","")).strip() or "(unknown)"
+                _cust_groups.setdefault(cname, []).append(row)
+
             progress = st.progress(0, text="Sending…")
             ok2, fail2, results2 = 0, 0, []
-            for idx, (_, row) in enumerate(to_send.iterrows()):
-                # Use the enriched row (with payment_link if fetched)
-                inv_no   = str(row.get("invoice_number","")).strip()
-                enriched_row = ef_send[ef_send["invoice_number"].astype(str) == inv_no]
-                row_data  = enriched_row.iloc[0].to_dict() if not enriched_row.empty else row.to_dict()
 
-                to_email     = str(row.get("email","")).strip() if send_to_customer else None
-                csm_email    = str(row.get("CSM Email","")).strip()
-                customer_cc  = str(row.get("Customer CC Email","")).strip()
-                cc_list      = _build_cc(csm_email, customer_cc)
-                customer  = str(row.get("customer_name",""))
+            for idx, (customer, rows) in enumerate(_cust_groups.items()):
+                inv_nos = [str(r.get("invoice_number","")).strip() for r in rows]
+                first   = rows[0]   # use first row for contact details
+
+                # Build enriched invoice DataFrame for this customer
+                cust_inv_df = pd.concat(
+                    [ef_send[ef_send["invoice_number"].astype(str) == n]
+                     for n in inv_nos], ignore_index=True
+                )
+                if cust_inv_df.empty:
+                    cust_inv_df = pd.DataFrame([r.to_dict() for r in rows])
+
+                to_email    = str(first.get("email","")).strip() if send_to_customer else None
+                csm_email   = str(first.get("CSM Email","")).strip()
+                customer_cc = str(first.get("Customer CC Email","")).strip()
+                cc_list     = _build_cc(csm_email, customer_cc)
                 subject, html = build_email(template_key, customer,
-                                            pd.DataFrame([row_data]),
-                                            str(row.get("CSM","")), custom_note)
+                                            cust_inv_df,
+                                            str(first.get("CSM","")), custom_note)
 
-                # ── Fetch PDF for this invoice ─────────────────────────────────
+                # ── Fetch PDFs for all invoices of this customer ───────────────
                 attachments_inv = []
-                pdf_note_inv    = "—"
-                if zoho_token_inv and attach_pdfs_inv and inv_no:
-                    try:
-                        pdf_bytes, _, _org_used, _plink = fetch_zoho_invoice_pdf(
-                            inv_no, zoho_token_inv,
-                            ZOHO_CFG["org_ids"], ZOHO_CFG["dc"],
-                        )
-                        if pdf_bytes:
-                            attachments_inv = [(f"{inv_no}.pdf", pdf_bytes)]
-                            pdf_note_inv    = "✅ Attached"
-                        else:
-                            pdf_note_inv = "⚠️ Not found in Zoho"
-                    except Exception as pdf_err:
-                        pdf_note_inv = f"❌ {pdf_err}"
+                pdf_notes_inv   = []
+                if zoho_token_inv and attach_pdfs_inv:
+                    for inv_no in inv_nos:
+                        if not inv_no: continue
+                        try:
+                            pdf_bytes, _, _org_used, _plink = fetch_zoho_invoice_pdf(
+                                inv_no, zoho_token_inv,
+                                ZOHO_CFG["org_ids"], ZOHO_CFG["dc"],
+                            )
+                            if pdf_bytes:
+                                attachments_inv.append((f"{inv_no}.pdf", pdf_bytes))
+                                pdf_notes_inv.append(f"✅ {inv_no}")
+                            else:
+                                pdf_notes_inv.append(f"⚠️ {inv_no} not found")
+                        except Exception as pdf_err:
+                            pdf_notes_inv.append(f"❌ {inv_no}: {pdf_err}")
+                pdf_note_str = " | ".join(pdf_notes_inv) if pdf_notes_inv else "—"
 
                 if to_email and "@" in to_email:
                     actual_to, actual_cc = to_email, cc_list
                 elif cc_list:
                     actual_to, actual_cc = cc_list[0], cc_list[1:]
                 else:
-                    results2.append({"Invoice": inv_no, "Status": "⚠️ No recipients", "PDF": pdf_note_inv})
+                    results2.append({"Customer": customer,
+                                     "Invoices": ", ".join(inv_nos),
+                                     "Status": "⚠️ No recipients", "PDFs": pdf_note_str})
                     continue
+
                 try:
                     send_reminder(SMTP_CFG, actual_to, actual_cc, subject, html,
                                   attachments=attachments_inv or None)
-                    log_email(inv_no, customer, actual_to, ", ".join(actual_cc), subject, "sent",
-                              template=selected_template)
+                    log_email(inv_nos, customer, actual_to, ", ".join(actual_cc),
+                              subject, "sent", template=selected_template)
                     ok2 += 1
-                    status2 = "✅ Sent" + (" (PDF attached)" if attachments_inv else "")
-                    results2.append({"Invoice": inv_no, "To": actual_to,
-                                     "Status": status2, "PDF": pdf_note_inv})
+                    status2 = "✅ Sent" + (f" ({len(attachments_inv)} PDF(s))" if attachments_inv else "")
+                    results2.append({"Customer": customer,
+                                     "Invoices": ", ".join(inv_nos),
+                                     "To": actual_to, "Status": status2, "PDFs": pdf_note_str})
                 except Exception as e:
-                    log_email(inv_no, customer, actual_to, ", ".join(actual_cc), subject, "failed", str(e),
-                              template=selected_template)
+                    log_email(inv_nos, customer, actual_to, ", ".join(actual_cc),
+                              subject, "failed", str(e), template=selected_template)
                     fail2 += 1
-                    results2.append({"Invoice": inv_no, "To": actual_to,
-                                     "Status": f"❌ {e}", "PDF": pdf_note_inv})
-                progress.progress((idx+1)/len(to_send), text=f"Sent {idx+1} of {len(to_send)}…")
+                    results2.append({"Customer": customer,
+                                     "Invoices": ", ".join(inv_nos),
+                                     "To": actual_to, "Status": f"❌ {e}", "PDFs": pdf_note_str})
+
+                progress.progress((idx+1)/len(_cust_groups),
+                                  text=f"Sent {idx+1} of {len(_cust_groups)} customer(s)…")
             progress.empty()
-            if ok2:   st.success(f"✅ {ok2} sent.")
+            if ok2:   st.success(f"✅ {ok2} email(s) sent to {ok2} customer(s).")
             if fail2: st.error(f"❌ {fail2} failed.")
             st.dataframe(pd.DataFrame(results2), use_container_width=True, hide_index=True)
 
